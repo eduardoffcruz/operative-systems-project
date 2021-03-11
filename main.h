@@ -1,3 +1,7 @@
+//_______________________________Projeto Sistemas Operativos @2021
+//Eduardo F. Ferreira Cruz 2018285164
+//Gonçalo Marinho Barroso 2019216314
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <semaphore.h> // include POSIX semaphores
@@ -13,7 +17,7 @@
 
 
 #define CONFIG_FILENAME "config.txt"
-
+#define LOG_FILENAME "log.txt"
 
 typedef struct Config{
     int time_unit; //numero de unidades de tempo por segundo
@@ -24,10 +28,13 @@ typedef struct Config{
     int fuel_capacity; //capacidade do deposito de combustivel (em litros)
 }Config;
 
+enum box_state{LIVRE,OCUPADA,RESERVADA};
+enum race_state{OFF,ON,PAUSE}; //se está a decorrer corrida ou não
 typedef struct mem_struct{
     //TODO: preencher à medida das necessidade
     //contém todos os dados necessários à boa gestão da corrida
-    int i;
+    race_state race_flag; 
+    box_state *boxes_states;
     //...
 
 }mem_struct;
@@ -43,6 +50,9 @@ char curr_time[9];
 
 
 //FUNCTION DECLARATION
+void race_manager(void);
+void malfunction_manager(void);
+void team_manager(int team_pid);
 void read_config(void);
 void update_curr_time(void);
 void destroy_all(void);

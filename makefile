@@ -1,18 +1,18 @@
 PROG = main
 
 CC = gcc
-FLAGS = -Wall -pthread
+FLAGS = -Wall -lpthread -D_REENTRANT
 
 
 all: ${PROG}
 
 clear: 
-	rm ./${PROG}
+	rm ${PROG}
 
 $(PROG):	${PROG}.c ${PROG}.h
 		${CC} ${FLAGS} ${PROG}.c -o ${PROG}
 
 
-#Projeto SO
-#--Eduardo Cruz
-#--Gonçalo Barroso
+#_______________Projeto Sistemas Operativos @2021
+#Eduardo F. Ferreira Cruz 2018285164
+#Gonçalo Marinho Barroso 2019216314
