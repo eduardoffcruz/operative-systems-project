@@ -1,7 +1,8 @@
 PROG = main
 
 CC = gcc
-FLAGS = -Wall -lpthread -D_REENTRANT
+FLAGS = -Wall -pthread
+#-lpthread -D_REENTRANT
 
 
 all: ${PROG}
