@@ -23,6 +23,7 @@ typedef struct Config{
     int time_unit; //numero de unidades de tempo por segundo
     int track_len,laps_qnt; //em metros //numero de voltas da corrida
     int teams_qnt; //numero de equipas (minimo de 3 equipas)
+    int max_car_qnt_per_team; 
     int avaria_time_interval; //nr de unidades de tempo entre novo calculo de avaria 
     int reparacao_min_time, reparacao_max_time; //tempo minimo e maximo de reparacao (em unidades de tempo)
     int fuel_capacity; //capacidade do deposito de combustivel (em litros)
@@ -35,33 +36,35 @@ typedef struct mem_struct{
     //TODO: preencher à medida das necessidade
     //contém todos os dados necessários à boa gestão da corrida
     enum race_state_type race_state; 
-    struct team* *teams; //dinamically allocated array of struct team
+    struct team *teams; 
     int curr_teams_qnt; //current teams qnt
-    //box_state *boxes_states;
+
     //...
+    //para synchronizacao
+    int wt,readers_in,readers_out;
 
 }mem_struct;
 
-//Node of Car_Threads LinkedList
+//Car
 typedef struct car{
     /******CAR*******/
     pthread_t car_thread;
-    char* car_number;
+    char car_number[32];
     int speed;
-    int consumption;
+    float consumption;
     int reliability;
 
     enum car_state_type car_state;
     /****************/
-    struct car *next;
 }car;
 
 //Teams 
 typedef struct team{
     /****TEAM****/
-    char* team_name;
+    char team_name[128];
     enum box_state_type box_state;
-    struct car *cars;//linked list head
+    int curr_car_qnt;
+    struct car *cars;//array
     /************/
 }team;
 
@@ -73,7 +76,9 @@ int shmid; //shared memory id
 mem_struct *shared_memory; 
 //semaphores
 sem_t* sem_log; //used to assure mutual exclusion when writing to log file and to stdout
-//sem_t* sem_add_car_shm;
+sem_t* sem_readers_in; //(mutex para proteger escrita em readers_in na shm) used to synchr writing and reading of new cars in shared memory
+sem_t* sem_readers_out; //(mutex para proteger escrita em readers_out na shm)^
+sem_t* sem_writecar; //^
 char curr_time[9]; 
 
 struct sigaction sa;
@@ -96,8 +101,10 @@ void set_race_state();
 void print_stats();
 void sigtstp_handler();
 void sigint_sigusr1_handler(int signal);
-void add_car_to_teams_list(char* team_name, car *c);
-team* create_team(char *team_name);
+void add_car_to_teams_list(char* team_name, car c);
+team create_team(char *team_name);
 void add_car_to_shm(char *command);
-car* create_car(char* car_number, int speed, int consumption, int reliability);
-
+car create_car(char* car_number, int speed, float consumption, int reliability);
+int is_valid_positive_float(char* str);
+int is_valid_integer(char *str);
+int validate_addcar_command(char *command, char *team_name, char* car_num, int *speed, float* cons, int *rel);
