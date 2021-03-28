@@ -40,15 +40,18 @@ typedef struct mem_struct{
     int curr_teams_qnt; //current teams qnt
 
     //...
-    //para synchronizacao
-    int wt,readers_in,readers_out;
+    //para synchronizacao na escrita e criação de equipas e carros 
+    int wt; //wait flag
+    int readers_in,readers_out; //counters
+    //para synch da leitura e escrita do estado da corrida
+    int race_state_readers;
 
 }mem_struct;
 
 //Car
 typedef struct car{
     /******CAR*******/
-    pthread_t car_thread;
+    pthread_t thread;
     char car_number[32];
     int speed;
     float consumption;
@@ -79,6 +82,9 @@ sem_t* sem_log; //used to assure mutual exclusion when writing to log file and t
 sem_t* sem_readers_in; //(mutex para proteger escrita em readers_in na shm) used to synchr writing and reading of new cars in shared memory
 sem_t* sem_readers_out; //(mutex para proteger escrita em readers_out na shm)^
 sem_t* sem_writecar; //^
+sem_t* sem_write_race_state;
+sem_t* sem_mutex_race_state;
+
 char curr_time[9]; 
 
 struct sigaction sa;
@@ -95,16 +101,16 @@ void init_log(void);
 void write_log(char *log);
 void update_curr_time(void);
 void init_shared_memory(void);
-void *car_thread(void);
+void *car_thread(void*);
 enum race_state_type get_race_state();
 void set_race_state();
 void print_stats();
 void sigtstp_handler();
 void sigint_sigusr1_handler(int signal);
-void add_car_to_teams_list(char* team_name, char* car_number, int speed, float consumption, int reliability);
-void add_team_to_shm(char *team_name, int i);
-void handle_addcar_command(char *command);
-void add_car_to_team(int i,int j, char* car_number, int speed, float consumption, int reliability);
+void add_car_to_teams_list(char* team_name, car c);
+team create_team(char *team_name);
+void add_car_to_shm(char *command);
+car create_car(char* car_number, int speed, float consumption, int reliability);
 int is_valid_positive_float(char* str);
 int is_valid_integer(char *str);
 int validate_addcar_command(char *command, char *team_name, char* car_num, int *speed, float* cons, int *rel);
