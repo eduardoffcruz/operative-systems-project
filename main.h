@@ -76,6 +76,8 @@ typedef struct team{
 Config config;
 FILE *log_fp;
 int shmid; //shared memory id
+int shmidTeams;
+int *shmidCars;
 mem_struct *shared_memory; 
 //semaphores
 sem_t* sem_log; //used to assure mutual exclusion when writing to log file and to stdout
@@ -98,7 +100,7 @@ void read_config(void);
 void update_curr_time(void);
 void destroy_all(void);
 void init_log(void);
-void write_log(char *log);
+void write_log(char *log, char*);
 void update_curr_time(void);
 void init_shared_memory(void);
 void *car_thread(void*);
@@ -107,10 +109,11 @@ void set_race_state();
 void print_stats();
 void sigtstp_handler();
 void sigint_sigusr1_handler(int signal);
-void add_car_to_teams_list(char* team_name, car c);
-team create_team(char *team_name);
-void add_car_to_shm(char *command);
-car create_car(char* car_number, int speed, float consumption, int reliability);
+void add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consumption, int reliability);
+void add_car_to_team(int i,int j,char* car_number, int speed, float consumption, int reliability);
+void add_team_to_shm(char *team_name, int i);
+void handle_addcar_command(char *command);
 int is_valid_positive_float(char* str);
 int is_valid_integer(char *str);
 int validate_addcar_command(char *command, char *team_name, char* car_num, int *speed, float* cons, int *rel);
+void handle_command(char *command);
