@@ -26,17 +26,22 @@ int main(void){
 
     //escrita e leitura da race_state (estado da corrida), em memória partilhada
     sem_unlink("SEM_WRITE_RACE_STATE");
-    sem_write_race_state=sem_open("SEM_WRITE_RACE_STATE",O_CREAT|O_EXCL,0700,1); //binary semaphore
+    sem_write_race_state=sem_open("SEM_WRITE_RACE_STATE",O_CREAT|O_EXCL,0700,1); 
     sem_unlink("SEM_MUTEX_RACE_STATE");
-    sem_mutex_race_state=sem_open("SEM_MUTEX_RACE_STATE",O_CREAT|O_EXCL,0700,1); //binary semaphore
+    sem_mutex_race_state=sem_open("SEM_MUTEX_RACE_STATE",O_CREAT|O_EXCL,0700,1); 
 
     //escrita e leitura de carros da memoria partilhada (escrita por 1 race manager, lida por vários team manager's)
     sem_unlink("SEM_READERS_IN");
-    sem_readers_in=sem_open("SEM_READERS_IN",O_CREAT|O_EXCL,0700,1); //binary semaphore
+    sem_readers_in=sem_open("SEM_READERS_IN",O_CREAT|O_EXCL,0700,1); 
     sem_unlink("SEM_READERS_OUT");
-    sem_readers_out=sem_open("SEM_READERS_OUT",O_CREAT|O_EXCL,0700,1); //binary semaphore
+    sem_readers_out=sem_open("SEM_READERS_OUT",O_CREAT|O_EXCL,0700,1); 
     sem_unlink("SEM_WRITECAR");
-    sem_writecar=sem_open("SEM_WRITECAR",O_CREAT|O_EXCL,0700,0); //binary semaphore 
+    sem_writecar=sem_open("SEM_WRITECAR",O_CREAT|O_EXCL,0700,0);  
+
+    //para bloquear/desbloquear gerador de avarias no processo malfunction_manager
+    sem_unlink("SEM_MALFUNCTION_GENERATOR");
+    sem_malfunction_generator=sem_open("SEM_MALFUNCTION_GENERATOR",O_CREAT|O_EXCL,0700,0);  
+
     
     #ifdef DEBUG
     printf("[DEBUG] semaphores created\n");
@@ -126,7 +131,7 @@ void handle_addcar_command(char *command){
         sem_wait(sem_writecar);
         shared_memory->wt=0;        
     }
-
+    //WRITE
     add_car_to_teams_shm(team_name,car_number,speed,consumption,reliability); //add car to shared memory (CRITICAL SECTION)
     shared_memory->readers_in=0;//reset
     shared_memory->readers_out=0;//reset
@@ -320,7 +325,7 @@ void start_race(){
     }
     else{
         //start race
-        set_race_state("ON");
+        set_race_state(ON);
     }
 
     sem_wait(sem_readers_out);
@@ -357,7 +362,7 @@ void race_manager(void){
     handle_command(exemplo);
     strcpy(exemplo,"ADDCAR TEAM: B, CAR: 078, SPEED: 20, CONSUMPTION: 0.09, RELIABILITY: 75");
     handle_command(exemplo);
-    strcpy(exemplo,"ADDCAR TEAM: A, CAR: 08, SPEED: 25, CONSUMPTION: 0.05, RELIABILITY: 89");
+    strcpy(exemplo,"ADDCAR TEAM: A, CAR: 08, SPEED: 25, CONSUMPTION: 0.05, RELIABILITY: 98");
     handle_command(exemplo);
     strcpy(exemplo,"ADDCAR TEAM: A, CAR: 098, SPEED: 25, CONSUMPTION: 0.05, RELIABILITY: 89"); //ERRO
     handle_command(exemplo);
@@ -376,7 +381,10 @@ void race_manager(void){
     strcpy(exemplo,"ADDCAR TEAM: T, CAR: 66, SPEED: 17, CONSUMPTION: 0.05, RELIABILITY: 91"); //ERRO
     handle_command(exemplo);
 
-    strcpy(exemplo,"START RACE!"); //ERRO
+    strcpy(exemplo,"START RACE!"); 
+    handle_command(exemplo);
+
+    strcpy(exemplo,"ADDCAR TEAM: W, CAR: 982, SPEED: 17, CONSUMPTION: 0.03, RELIABILITY: 91"); //ERRO
     handle_command(exemplo);
     /**********************************/
 
@@ -388,7 +396,12 @@ void race_manager(void){
 
 void handle_command(char *command){
     if(strncmp(command,"ADDCAR",6)==0){
-        handle_addcar_command(command);
+        if(get_race_state()==OFF){
+            handle_addcar_command(command);
+        }
+        else{
+            write_log("ADDCAR COMMAND REJECTED, RACE ALREADY STARTED!","");
+        }
     }
     else if(strlen(command)==11 && strncmp(command,"START RACE!",11)==0){
         write_log("NEW COMMAND RECEIVED: START RACE","");
@@ -414,6 +427,13 @@ void set_race_state(enum race_state_type state){
     sem_wait(sem_write_race_state); //exclusão mutua
     shared_memory->race_state=state; //write (zona critica)
     sem_post(sem_write_race_state); 
+    if(state==ON){
+        //if race is set to start, release lock on malfunctions generator in malfunction manager process
+        sem_post(sem_malfunction_generator);
+    }else{
+        //if race is set to pause or to end, grab lock (pause malfunctions generator) 
+        sem_wait(sem_malfunction_generator); 
+    }
 }
 
 enum race_state_type get_race_state(){
@@ -431,7 +451,7 @@ enum race_state_type get_race_state(){
 
     sem_wait(sem_mutex_race_state); //mutex
     shared_memory->race_state_readers--; 
-    if(shared_memory->race_state_readers==0){ //first reader
+    if(shared_memory->race_state_readers==0){ //no reader
         sem_post(sem_write_race_state); //block writing 
     }
     sem_post(sem_mutex_race_state);
@@ -507,7 +527,39 @@ void *car_thread(void *void_car){
 
 void malfunction_manager(void){
     //TODO:processo responsavel por gerar aleatoriamente as avarias dos carros a partir da informacao da sua fiabilidade
-    ;
+    srand(time(0)); //set seed
+    int rand_num;
+    int i,j;
+    int malfunction_count=0;
+    while(1){
+        sem_wait(sem_malfunction_generator); 
+        sleep(config.avaria_time_interval/config.time_unit); 
+        //all this values can be acessed during RACE time because, 
+        //no changes are made or allowed to be made, to this values, during race time. 
+        for(i=0;i<shared_memory->curr_teams_qnt;i++){ 
+            for(j=0;j<shared_memory->teams[i].curr_car_qnt;j++){
+                rand_num=rand()%101; //generate random number from [0-100]
+                if(rand_num>=shared_memory->teams[i].cars[j].reliability){ 
+                    //AVARIA NO CARRO rand_num>=shared_memory->teams[i].cars[j]
+                    malfunction_count++;
+                    #ifdef DEBUG
+                    printf("[DEBUG] AVARIA NO CARRO number [%s] DA TEAM %s\n",shared_memory->teams[i].cars[j].car_number,shared_memory->teams[i].team_name);
+                    #endif
+                    //...comunicar avaria ao carro, pela message queue 
+                }
+            }
+        }
+        /*********************************/
+        //PARA CASO DE TESTE APENAS TODO:(APAGAR LATER..)
+        if(malfunction_count>10){
+            sem_post(sem_malfunction_generator);
+            break;
+        }
+        /*********************************/
+
+        sem_post(sem_malfunction_generator);
+    }
+    
 }
 
 void init_shared_memory(void){
@@ -569,6 +621,8 @@ void destroy_all(void){
     sem_unlink("SEM_READERS_OUT");
     sem_close(sem_writecar);
     sem_unlink("SEM_WRITECAR");
+    sem_close(sem_malfunction_generator);
+    sem_unlink("SEM_MALFUNCTION_GENERATOR");
 
     //pthread_mutex_destroy(&mutex);
     //pthread_cond_destroy(&cond);

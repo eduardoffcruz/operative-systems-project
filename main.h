@@ -50,7 +50,6 @@ typedef struct mem_struct{
 
 //Car
 typedef struct car{
-    /******CAR*******/
     pthread_t thread;
     char car_number[32];
     int speed;
@@ -58,19 +57,22 @@ typedef struct car{
     int reliability;
 
     enum car_state_type car_state;
-    /****************/
 }car;
 
 //Teams 
 typedef struct team{
-    /****TEAM****/
     char team_name[128];
     enum box_state_type box_state;
     int curr_car_qnt;
     struct car *cars;//array
-    /************/
 }team;
 
+//STATS
+typedef struct stats{
+    int total_malfunctions; //total de avarias ocorridas durante a corrida
+    int total_refuels; //total de abastecimentos realizados durante a corrida
+    int cars_in_pista_qnt; //numero de carros em pista
+}stats;
 
 //GLOBAL VARIABLES
 Config config;
@@ -86,6 +88,7 @@ sem_t* sem_readers_out; //(mutex para proteger escrita em readers_out na shm)^
 sem_t* sem_writecar; //^
 sem_t* sem_write_race_state;
 sem_t* sem_mutex_race_state;
+sem_t* sem_malfunction_generator;
 
 char curr_time[9]; 
 
