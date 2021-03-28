@@ -40,18 +40,15 @@ typedef struct mem_struct{
     int curr_teams_qnt; //current teams qnt
 
     //...
-    //para synchronizacao na escrita e criação de equipas e carros 
-    int wt; //wait flag
-    int readers_in,readers_out; //counters
-    //para synch da leitura e escrita do estado da corrida
-    int race_state_readers;
+    //para synchronizacao
+    int wt,readers_in,readers_out;
 
 }mem_struct;
 
 //Car
 typedef struct car{
     /******CAR*******/
-    pthread_t thread;
+    pthread_t car_thread;
     char car_number[32];
     int speed;
     float consumption;
@@ -82,9 +79,6 @@ sem_t* sem_log; //used to assure mutual exclusion when writing to log file and t
 sem_t* sem_readers_in; //(mutex para proteger escrita em readers_in na shm) used to synchr writing and reading of new cars in shared memory
 sem_t* sem_readers_out; //(mutex para proteger escrita em readers_out na shm)^
 sem_t* sem_writecar; //^
-sem_t* sem_write_race_state;
-sem_t* sem_mutex_race_state;
-
 char curr_time[9]; 
 
 struct sigaction sa;
@@ -101,7 +95,7 @@ void init_log(void);
 void write_log(char *log);
 void update_curr_time(void);
 void init_shared_memory(void);
-void *car_thread(void*);
+void *car_thread(void);
 enum race_state_type get_race_state();
 void set_race_state();
 void print_stats();

@@ -20,17 +20,9 @@ int main(void){
     #endif
 
     //SEMAPHOREs
-    //mutex para escrita synchronizada no ficheiro de log
     sem_unlink("SEM_LOG");
     sem_log=sem_open("SEM_LOG",O_CREAT|O_EXCL,0700,1); //binary semaphore
 
-    //escrita e leitura da race_state (estado da corrida), em memória partilhada
-    sem_unlink("SEM_WRITE_RACE_STATE");
-    sem_write_race_state=sem_open("SEM_WRITE_RACE_STATE",O_CREAT|O_EXCL,0700,1); //binary semaphore
-    sem_unlink("SEM_MUTEX_RACE_STATE");
-    sem_mutex_race_state=sem_open("SEM_MUTEX_RACE_STATE",O_CREAT|O_EXCL,0700,1); //binary semaphore
-
-    //escrita e leitura de carros da memoria partilhada (escrita por 1 race manager, lida por vários team manager's)
     sem_unlink("SEM_READERS_IN");
     sem_readers_in=sem_open("SEM_READERS_IN",O_CREAT|O_EXCL,0700,1); //binary semaphore
     sem_unlink("SEM_READERS_OUT");
@@ -110,25 +102,38 @@ void handle_addcar_command(char *command){
         return;
     }
 
+<<<<<<< HEAD
+=======
+    c=create_car(car_number,speed,consumption,reliability);
+    #ifdef DEBUG
+    printf("[DEBUG] created car from command. %s %s %f %d %d %d\n",team_name,c.car_number,c.consumption,c.speed,c.reliability,c.car_state);
+    #endif
+    
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
     //implementaçao do caso clássico de write/readers sem starvation:
     //a ideia consiste em o writer indicar aos readers a sua necessidade de escrever. A partir daí nenhum reader pode entrar na zona critica.
     //ao sairem da zona critica cada reader verifica se o writer está waiting e o ultimo reader a sair liberta o writer para q ele possa entrar na zona e escrever
     //depois de escrever, o write liberta os readers q estão waiting para q eles possam novamente efetuar leitura
-    sem_wait(sem_readers_in);
-    sem_wait(sem_readers_out);
-    if(shared_memory->readers_in==shared_memory->readers_out){
-        sem_post(sem_readers_out);
+    sem_wait(sem_readcar);
+    sem_wait(sem_readcar1);
+    if(shared_memory->readers_out==shared_memory->readers_in){
+        sem_post(sem_readcar1);
     }
     else{
-        shared_memory->wt=1;//set flag = true
-        sem_post(sem_readers_out);
+        shared_memory->wt=1;//true
+        sem_post(sem_readcar1);
         sem_wait(sem_writecar);
         shared_memory->wt=0;        
     }
+<<<<<<< HEAD
 
     add_car_to_teams_list(team_name,car_number,speed,consumption,reliability); //add car to shared memory (CRITICAL SECTION)
 
     sem_post(sem_readers_in);
+=======
+    add_car_to_teams_list(team_name,c); //add car to shared memory (CRITICAL SECTION)
+    sem_post(sem_readcar);
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
 
 }
 
@@ -247,6 +252,7 @@ int is_valid_positive_float(char* str){ //devolve 0 se str nao tiver o formato d
 void add_team_to_shm(char *team_name, int i){
     struct car cs[config.max_car_qnt_per_team];
     int len=strlen(team_name);
+<<<<<<< HEAD
 
     //memcpy(shared_memory->teams[i].team_name,team_name,len*sizeof(char));
     strcpy(shared_memory->teams[i].team_name,team_name);
@@ -271,12 +277,36 @@ void add_car_to_team(int i,int j, char* car_number, int speed, float consumption
     shared_memory->teams[i].cars[j].consumption=consumption;
     shared_memory->teams[i].cars[j].reliability=reliability;
     shared_memory->teams[i].curr_car_qnt++; 
+=======
+    memcpy(t.team_name,team_name,len*sizeof(char));
+    t.team_name[len]='\0';
+    t.cars=cs;
+    t.box_state=LIVRE;
+    t.curr_car_qnt=0;
+
+    return t;
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
 }
 
 void add_car_to_teams_list(char* team_name, char* car_number, int speed, float consumption, int reliability){
     //verifica se já existe uma equipa com o nome team_name, no array de team's na SHM. Se existir, adiciona o car ao inicio da linked list que a struct team possui.
     //se n existir nenhuma equipa com esse nome e se ainda houver espaço para mais equipas, uma team é criada e adicionada à array de team's e o car é adicionado a essa team.
     int i,j;
+<<<<<<< HEAD
+=======
+    team t;
+    if(shared_memory->curr_teams_qnt==0){
+        t=create_team(team_name);
+        t.cars[0]=c;
+        t.curr_car_qnt++;       
+        shared_memory->teams[0]=t; //TODO: !!
+        shared_memory->curr_teams_qnt++; //TODO: !!
+        #ifdef DEBUG
+        printf("[DEBUG]first team created\n");
+        #endif
+        return;
+    }
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
     for(i=0;i<shared_memory->curr_teams_qnt;i++){
         if(strcmp(shared_memory->teams[i].team_name,team_name)==0){
             break;
@@ -288,10 +318,20 @@ void add_car_to_teams_list(char* team_name, char* car_number, int speed, float c
             fprintf(stderr,"LIMITE DE EQUIPAS EXCEDIDO (nao pode adicionar mais equipas)!");
             return;
         } 
+<<<<<<< HEAD
         add_team_to_shm(team_name,i);
         add_car_to_team(i,0, car_number, speed, consumption, reliability);
         #ifdef DEBUG
         printf("[DEBUG]car added to new team. %s %.2f %d %d %d\n",shared_memory->(teams[i].cars[0].car_number),shared_memory->teams[i].cars[0].consumption,shared_memory->teams[i].cars[0].speed,shared_memory->teams[i].cars[0].reliability,shared_memory->teams[i].cars[0].car_state);
+=======
+        t=create_team(team_name);
+        t.cars[0]=c;
+        t.curr_car_qnt++;  
+        shared_memory->teams[i]=t; //TODO: !!
+        shared_memory->curr_teams_qnt++; //TODO: !!
+        #ifdef DEBUG
+        printf("[DEBUG]car added to new team. %s %f %d %d %d\n",c.car_number,c.consumption,c.speed,c.reliability,c.car_state);
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
         #endif
     }
     else{
@@ -304,7 +344,11 @@ void add_car_to_teams_list(char* team_name, char* car_number, int speed, float c
         }
         add_car_to_team(i,j, car_number, speed, consumption, reliability);
         #ifdef DEBUG
+<<<<<<< HEAD
         printf("[DEBUG]car added to already existing team. %s %.2f %d %d %d\n",shared_memory->teams[i].cars[j].car_number,shared_memory->teams[i].cars[j].consumption,shared_memory->teams[i].cars[j].speed,shared_memory->teams[i].cars[j].reliability,shared_memory->teams[i].cars[j].car_state);
+=======
+        printf("[DEBUG]car added to already existing team. %s %f %d %d %d\n",c.car_number,c.consumption,c.speed,c.reliability,c.car_state);
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
         #endif
     }
 }
@@ -331,16 +375,20 @@ void race_manager(void){
     }
 
     //TODO:
-    char exemplo[1024]="ADDCAR TEAM: A, CAR: 20, SPEED: 30, CONSUMPTION: 0.04, RELIABILITY: 95";
+    char *exemplo="ADDCAR TEAM: A, CAR: 20, SPEED: 30, CONSUMPTION: 0.04, RELIABILITY: 95";
     if(strncmp(exemplo,"ADDCAR",6)==0){
         handle_addcar_command(exemplo);
     }
+<<<<<<< HEAD
     strcpy(exemplo,"ADDCAR TEAM: B, CAR: 078, SPEED: 20, CONSUMPTION: 0.09, RELIABILITY: 79");
     if(strncmp(exemplo,"ADDCAR",6)==0){
         handle_addcar_command(exemplo);
     }
 
     set_race_state(ON);
+=======
+    
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
 
 
 
@@ -362,36 +410,16 @@ void sigtstp_handler(){
     print_stats();
 }
 
-void set_race_state(enum race_state_type state){
+void set_race_state(){
     //só pode aceder um processo de cada vez à variavel shared_variable->race_flag, para escrita 
+    //só pode ser acedida para escrita qnd nenhum processo estiver a ler
     //problema clássico do escritor/leitor
-    //neste caso damos prioridade aos leitores 
-    sem_wait(sem_write_race_state); //exclusão mutua
-    shared_memory->race_state=state; //write (zona critica)
-    sem_post(sem_write_race_state); 
+    ;
 }
 
 enum race_state_type get_race_state(){
     //todos os processos podem ler a variável shared_variable->race_flag (desde q nenhum processo esteja a escrever nela!)  
-    int state;
-
-    sem_wait(sem_mutex_race_state); //mutex
-    shared_memory->race_state_readers++; 
-    if(shared_memory->race_state_readers==1){ //first reader
-        sem_wait(sem_write_race_state); //block writing 
-    }
-    sem_post(sem_mutex_race_state);
-
-    state=shared_memory->race_state; //READ
-
-    sem_wait(sem_mutex_race_state); //mutex
-    shared_memory->race_state_readers--; 
-    if(shared_memory->race_state_readers==0){ //first reader
-        sem_post(sem_write_race_state); //block writing 
-    }
-    sem_post(sem_mutex_race_state);
-   
-    return state;
+    return 1;
 }
 
 void team_manager(int team_id){
@@ -400,20 +428,16 @@ void team_manager(int team_id){
     //TODO: team manager escreve as informações de cada carro, recebidas do Named Pipe, na shared_emmory
     //TODO: manter atualizada na shared_memory, o estado da box! (LIVRE;OCUPADA;RESERVADA)
     //car threads sao criadas através da receção de comandos através do named pipe 
-    team t;
-    car *team_cars;
-    int i=0;
-
-	team_cars = (car*)malloc(sizeof(car)*(config.max_car_qnt_per_team)); //heap
-
+    
     do{
         //read cars from shared memory
-        sem_wait(sem_readers_in); 
+        sem_wait(sem_readers_in); //mutex para 
         shared_memory->readers_in++;
         sem_post(sem_readers_in);
 
         //verificar se já existe registo da team i através do curr_team_qnt 
         //se sim, LER CARROs e criar threads
+<<<<<<< HEAD
         //TODO: 
         //exemplo: esta equipa tem o nr 0. Se a current qnt de equipas for 0, é pq esta equipa ainda n foi criada através do named pipe
         //logo não se faz nada. Se a curr qnt de equipas fosse 2, é pq já existe a equipa com o nr 0 na shared memory, logo é necessário verificar se esta já tem carros e se tiver, criar as respetivas threads!
@@ -434,6 +458,8 @@ void team_manager(int team_id){
                 }
             }
         }
+=======
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
 
         sem_wait(sem_readers_out);
         shared_memory->readers_out++;
@@ -442,7 +468,8 @@ void team_manager(int team_id){
         } 
         sem_post(sem_readers_out);
 
-    }while(get_race_state()==OFF); //antes da corrida começar
+    }
+    while(get_race_state()==OFF);
     /*if(pthread_create(..., NULL, car_thread){
         //erro
         fprintf(stderr,"Error: unable to create car thread\n");
@@ -451,15 +478,14 @@ void team_manager(int team_id){
 
 
 
-    pthread_exit(NULL);*/
-    for(int j=0;j<i;j++) pthread_join(team_cars[j].thread,NULL); //wait for threads to end
 
+    pthread_exit(NULL);*/
+    ;
 }
 
-void *car_thread(void *void_car){
-    car this_car=*((car*)void_car);
+void *car_thread(void){
     //car thread function. cada car thread é responsavel pela gestao das voltas a pista, pela gestao do combustivel, e pela gestao do modo de circulacao(normal ou em segurança)
-    printf("hello i'm car number [%s] :)\n",this_car.car_number);
+    printf("hello i'm a car");
     return NULL;
 }
 
@@ -482,11 +508,14 @@ void init_shared_memory(void){
     }
 
     //initialize values
-    //for(i=0;i<config.teams_qnt;i++) ts[i]=NULL;
     shared_memory->teams=ts;
     shared_memory->race_state=OFF; 
     shared_memory->curr_teams_qnt=0; 
+<<<<<<< HEAD
     shared_memory->wt=0; shared_memory->readers_in=0;shared_memory->readers_out=0; shared_memory->race_state_readers=0;
+=======
+    shared_memory->wt=0; shared_memory->readers_in=0;shared_memory->readers_out=0;
+>>>>>>> parent of 96c3a63 (falta corrigir uma coisa)
 
 }
 
