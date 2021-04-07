@@ -79,7 +79,7 @@ Config config;
 FILE *log_fp;
 int shmid; //shared memory id
 int shmidTeams;
-int *shmidCars;
+int *shmidCars; //array with sharedmemory ids for team's cars array
 mem_struct *shared_memory; 
 //semaphores
 sem_t* sem_log; //used to assure mutual exclusion when writing to log file and to stdout

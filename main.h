@@ -36,7 +36,6 @@ typedef struct mem_struct{
     //TODO: preencher à medida das necessidade
     //contém todos os dados necessários à boa gestão da corrida
     enum race_state_type race_state; 
-    struct team *teams; 
     int curr_teams_qnt; //current teams qnt
 
     //...
@@ -62,9 +61,8 @@ typedef struct car{
 //Teams 
 typedef struct team{
     char team_name[128];
-    enum box_state_type box_state;
     int curr_car_qnt;
-    struct car *cars;//array
+    enum box_state_type box_state;
 }team;
 
 //STATS
@@ -78,9 +76,11 @@ typedef struct stats{
 Config config;
 FILE *log_fp;
 int shmid; //shared memory id
-int shmidTeams;
-int *shmidCars;
+/*SHARED MEMORY*/
 mem_struct *shared_memory; 
+team *teams;
+car *cars;
+/********************/
 //semaphores
 sem_t* sem_log; //used to assure mutual exclusion when writing to log file and to stdout
 sem_t* sem_readers_in; //(mutex para proteger escrita em readers_in na shm) used to synchr writing and reading of new cars in shared memory

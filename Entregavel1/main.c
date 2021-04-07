@@ -551,7 +551,7 @@ void malfunction_manager(void){
         }
         /*********************************/
         //PARA CASO DE TESTE APENAS TODO:(APAGAR LATER..)
-        if(malfunction_count>10){
+        if(malfunction_count>=5){
             sem_post(sem_malfunction_generator);
             break;
         }
@@ -584,7 +584,7 @@ void init_shared_memory(void){
     }
     shared_memory->teams = (struct team*)shmat(shmidTeams,NULL,0);
 
-    shmidCars=(int*)malloc(config.teams_qnt*sizeof(int));
+    shmidCars=(int*)malloc(config.teams_qnt*sizeof(int)); //to save shm car's array ids
     for(int i=0;i<config.teams_qnt;i++){
         if((shmidCars[i] = shmget(IPC_PRIVATE,sizeof(struct team)*(config.max_car_qnt_per_team),IPC_CREAT | 0700))<0){
             fprintf(stderr,"Error: in shmget with IPC_CREAT\n");

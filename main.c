@@ -255,32 +255,34 @@ int is_valid_positive_float(char* str){ //devolve 0 se str nao tiver o formato d
 
 void add_team_to_shm(char *team_name, int i){
     int len=strlen(team_name);
-    memcpy(shared_memory->teams[i].team_name,team_name,len*sizeof(char));
-    shared_memory->teams[i].team_name[len]='\0';
-    shared_memory->teams[i].box_state=LIVRE;
-    shared_memory->teams[i].curr_car_qnt=0;
+    memcpy(teams[i].team_name,team_name,len*sizeof(char));
+    teams[i].team_name[len]='\0';
+    teams[i].box_state=LIVRE;
+    teams[i].curr_car_qnt=0;
 
     shared_memory->curr_teams_qnt++;
 }
 
 void add_car_to_team(int i,int j,char* car_number, int speed, float consumption, int reliability){
     int len=strlen(car_number);
-    memcpy(shared_memory->teams[i].cars[j].car_number,car_number,len*sizeof(char));
-    shared_memory->teams[i].cars[j].car_number[len]='\0';
-    shared_memory->teams[i].cars[j].car_state=BOX;
-    shared_memory->teams[i].cars[j].speed=speed;
-    shared_memory->teams[i].cars[j].consumption=consumption;
-    shared_memory->teams[i].cars[j].reliability=reliability;
+    int car_index=i*config.max_car_qnt_per_team+j;
+    memcpy(cars[car_index].car_number,car_number,len*sizeof(char));
+    cars[car_index].car_number[len]='\0';
+    cars[car_index].car_state=BOX;
+    cars[car_index].speed=speed;
+    cars[car_index].consumption=consumption;
+    cars[car_index].reliability=reliability;
 
-    shared_memory->teams[i].curr_car_qnt++;
+    teams[i].curr_car_qnt++;
 }
+
 
 void add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consumption, int reliability){
     //verifica se já existe uma equipa com o nome team_name, no array de team's na SHM. Se existir, adiciona o car ao inicio da linked list que a struct team possui.
     //se n existir nenhuma equipa com esse nome e se ainda houver espaço para mais equipas, uma team é criada e adicionada à array de team's e o car é adicionado a essa team.
     int i,j;
     for(i=0;i<shared_memory->curr_teams_qnt;i++){
-        if(strcmp(shared_memory->teams[i].team_name,team_name)==0){
+        if(strcmp(teams[i].team_name,team_name)==0){
             break;
         }
     }
@@ -294,21 +296,22 @@ void add_car_to_teams_shm(char* team_name, char* car_number,int speed,float cons
         add_car_to_team(i,0,car_number,speed,consumption,reliability);
 
         #ifdef DEBUG
-        printf("[DEBUG] CAR ADDED TO NEW TEAM %s with consumption: %.2f ; speed : %d ; reliability : %d \n",shared_memory->teams[i].cars[0].car_number,shared_memory->teams[i].cars[0].consumption,shared_memory->teams[i].cars[0].speed,shared_memory->teams[i].cars[0].reliability);
+        printf("[DEBUG] CAR ADDED TO NEW TEAM %s with consumption: %.2f ; speed : %d ; reliability : %d \n",teams[i].team_name,cars[i*config.max_car_qnt_per_team+0].consumption,cars[i*config.max_car_qnt_per_team+0].speed,cars[i*config.max_car_qnt_per_team+0].reliability);
         #endif
     }
     else{
         //já existe team com este nome no index i
         //insere o car no inicio da linked list (head);
-        j=shared_memory->teams[i].curr_car_qnt;
+        j=teams[i].curr_car_qnt;
         if(j==config.max_car_qnt_per_team){
             write_log("UNABLE TO ADD CAR, CAR LIMIT EXCEEDED FOR TEAM ",team_name);
             return;
         }
+
         add_car_to_team(i,j,car_number,speed,consumption,reliability);
 
         #ifdef DEBUG
-        printf("[DEBUG] CAR ADDED TO ALREADY EXISTING TEAM %s with consumption: %.2f ; speed : %d ; reliability : %d \n",shared_memory->teams[i].cars[0].car_number,shared_memory->teams[i].cars[0].consumption,shared_memory->teams[i].cars[0].speed,shared_memory->teams[i].cars[0].reliability);
+        printf("[DEBUG] CAR ADDED TO ALREADY EXISTING TEAM %s with consumption: %.2f ; speed : %d ; reliability : %d \n",teams[i].team_name,cars[i*config.max_car_qnt_per_team+j].consumption,cars[i*config.max_car_qnt_per_team+j].speed,cars[i*config.max_car_qnt_per_team+j].reliability);
         #endif
     }
 }
@@ -466,10 +469,10 @@ void team_manager(int team_id){
     //TODO: manter atualizada na shared_memory, o estado da box! (LIVRE;OCUPADA;RESERVADA)
     //car threads sao criadas através da receção de comandos através do named pipe 
 
-    car *team_cars;
+    int *cars_index;
     int i=0;
 
-	team_cars = (car*)malloc(sizeof(car)*(config.max_car_qnt_per_team)); //heap
+	cars_index = (int*)malloc(sizeof(int)*(config.max_car_qnt_per_team)); //heap
 
     do{
         //read cars from shared memory
@@ -483,18 +486,20 @@ void team_manager(int team_id){
         //exemplo: esta equipa tem o nr 0. Se a current qnt de equipas for 0, é pq esta equipa ainda n foi criada através do named pipe
         //logo não se faz nada. Se a curr qnt de equipas fosse 2, é pq já existe a equipa com o nr 0 na shared memory, logo é necessário verificar se esta já tem carros e se tiver, criar as respetivas threads!
         //por outro lado se o nr de carros q a equipa tem na shared memory for superior a i, então é porque faltam criar threads para os carros
+        
         if(shared_memory->curr_teams_qnt>=team_id+1){
-            if(shared_memory->teams[team_id].curr_car_qnt>=i+1){
-                while(i<shared_memory->teams[team_id].curr_car_qnt){
-                    team_cars[i]=shared_memory->teams[team_id].cars[i]; //copy car struct 
-		            if(pthread_create(&team_cars[i].thread,NULL,car_thread,&team_cars[i])==-1){
+            if(teams[team_id].curr_car_qnt>=i+1){
+                while(i<teams[team_id].curr_car_qnt){
+                    cars_index[i]=team_id*config.max_car_qnt_per_team+i; //index in shm memory array of cars
+                    printf("car name: %s\n",cars[team_id*config.max_car_qnt_per_team+i].car_number);
+		            if(pthread_create(&cars[team_id*config.max_car_qnt_per_team+i].thread,NULL,car_thread,&cars_index[i])==-1){
                         //erro
                         fprintf(stderr,"Error: unable to create car thread\n");
                         destroy_all();
                     }
                     i++;
                     #ifdef DEBUG
-                    printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM %s !\n",shared_memory->teams[team_id].team_name);
+                    printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM %s !\n",teams[team_id].team_name);
                     #endif
                 }
             }
@@ -511,15 +516,15 @@ void team_manager(int team_id){
 
 
    /* pthread_exit(NULL); */
-    for(int j=0;j<i;j++) pthread_join(team_cars[j].thread,NULL); //wait for threads to end
+    for(int j=0;j<i;j++) pthread_join(cars[team_id*config.max_car_qnt_per_team+j].thread,NULL); //wait for threads to end
 
 }
 
-void *car_thread(void *void_car){
-    car this_car=*((car*)void_car);
+void *car_thread(void *void_index){
+    int car_index=*((int*)void_index);
     //car thread function. cada car thread é responsavel pela gestao das voltas a pista, pela gestao do combustivel, e pela gestao do modo de circulacao(normal ou em segurança)
     #ifdef DEBUG
-    printf("[DEBUG] hello i'm car number [%s] :)\n",this_car.car_number);
+    printf("[DEBUG] hello i'm car number [%s] :)\n",cars[car_index].car_number);
     #endif
     
     return NULL;
@@ -537,20 +542,20 @@ void malfunction_manager(void){
         //all this values can be acessed during RACE time because, 
         //no changes are made or allowed to be made, to this values, during race time. 
         for(i=0;i<shared_memory->curr_teams_qnt;i++){ 
-            for(j=0;j<shared_memory->teams[i].curr_car_qnt;j++){
+            for(j=0;j<teams[i].curr_car_qnt;j++){
                 rand_num=rand()%101; //generate random number from [0-100]
-                if(rand_num>=shared_memory->teams[i].cars[j].reliability){ 
-                    //AVARIA NO CARRO rand_num>=shared_memory->teams[i].cars[j]
+                if(rand_num>=cars[i*config.max_car_qnt_per_team+j].reliability){ 
+                    //AVARIA NO CARRO rand_num>=cars[car_index]
                     malfunction_count++;
                     #ifdef DEBUG
-                    printf("[DEBUG] AVARIA NO CARRO number [%s] DA TEAM %s\n",shared_memory->teams[i].cars[j].car_number,shared_memory->teams[i].team_name);
+                    printf("[DEBUG] AVARIA NO CARRO number [%s] DA TEAM %s\n",cars[i*config.max_car_qnt_per_team+j].car_number,teams[i].team_name);
                     #endif
                     //...comunicar avaria ao carro, pela message queue 
                 }
             }
         }
         /*********************************/
-        //PARA CASO DE TESTE APENAS TODO:(APAGAR LATER..)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
         if(malfunction_count>10){
             sem_post(sem_malfunction_generator);
             break;
@@ -563,8 +568,9 @@ void malfunction_manager(void){
 }
 
 void init_shared_memory(void){
+    
     //SHM Create
-	if ((shmid=shmget(IPC_PRIVATE,sizeof(int),IPC_CREAT|0700)) < 0){
+	if ((shmid=shmget(IPC_PRIVATE,sizeof(mem_struct)+config.teams_qnt*sizeof(team)+config.teams_qnt*config.max_car_qnt_per_team*sizeof(car),IPC_CREAT|0700)) < 0){
 		fprintf(stderr,"Error: in shmget with IPC_CREAT\n");
 		exit(-1);
 	} 
@@ -576,25 +582,10 @@ void init_shared_memory(void){
 
     shared_memory->race_state=OFF; 
     shared_memory->curr_teams_qnt=0; 
-    shared_memory->wt=0; shared_memory->readers_in=0;shared_memory->readers_out=0;
+    shared_memory->wt=0; shared_memory->readers_in=0; shared_memory->readers_out=0;
     
-    if((shmidTeams = shmget(IPC_PRIVATE,sizeof(struct team)*(config.teams_qnt),IPC_CREAT | 0700))<0){
-        fprintf(stderr,"Error: in shmget with IPC_CREAT\n");
-		destroy_all();
-    }
-    shared_memory->teams = (struct team*)shmat(shmidTeams,NULL,0);
-
-    shmidCars=(int*)malloc(config.teams_qnt*sizeof(int));
-    for(int i=0;i<config.teams_qnt;i++){
-        if((shmidCars[i] = shmget(IPC_PRIVATE,sizeof(struct team)*(config.max_car_qnt_per_team),IPC_CREAT | 0700))<0){
-            fprintf(stderr,"Error: in shmget with IPC_CREAT\n");
-            destroy_all();
-        }
-        shared_memory->teams[i].cars=(struct car*)shmat(shmidCars[i],NULL,0);
-
-        shared_memory->teams[i].box_state=-1;
-        shared_memory->teams[i].curr_car_qnt=0;
-    }
+    teams=(team*)(shared_memory+1);
+    cars=(car*)(teams+config.teams_qnt);
 }
 
 void print_stats(){
@@ -633,8 +624,6 @@ void destroy_all(void){
 
     //close log file
     fclose(log_fp);
-
-    free(shmidCars);
 
     system("./kill_ipcs.sh");
 
