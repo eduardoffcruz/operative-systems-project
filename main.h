@@ -12,12 +12,19 @@
 #include <sys/shm.h>
 #include <sys/fcntl.h> //for O_* flags
 #include <sys/types.h>
-#include <wait.h>
+#include <errno.h>
 #include <time.h>
 #include <string.h>
+#include <sys/stat.h> //mkfifo
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/msg.h>
 
 #define CONFIG_FILENAME "config.txt"
 #define LOG_FILENAME "log.txt"
+#define PIPE_NAME "my_pipe"
+
+#define BUFF_SIZE 256
 
 typedef struct Config{
     int time_unit; //numero de unidades de tempo por segundo
@@ -30,20 +37,28 @@ typedef struct Config{
 }Config;
 
 enum box_state_type{LIVRE,OCUPADA,RESERVADA};
-enum race_state_type{OFF,ON,PAUSE}; //se está a decorrer corrida ou não
+enum race_state_type{OFF,ON}; //se está a decorrer corrida ou não
 enum car_state_type{CORRIDA,SEGURANCA,BOX,DESISTENCIA,TERMINADO};
 typedef struct mem_struct{
     //TODO: preencher à medida das necessidade
     //contém todos os dados necessários à boa gestão da corrida
-    enum race_state_type race_state; 
+
     int curr_teams_qnt; //current teams qnt
 
     //...
-    //para synchronizacao na escrita e criação de equipas e carros 
-    int wt; //wait flag
-    int readers_in,readers_out; //counters
+    //para synchronizacao na escrita e criação de equipas+carros 
+    int readers_in;
+    int readers_out;
+    int wait;
+    int new_cars_counter;
+
+    pthread_mutex_t mutex_race_state;
+    pthread_cond_t race_state_cond;
+    enum race_state_type race_state; 
+
+
     //para synch da leitura e escrita do estado da corrida
-    int race_state_readers;
+    //int race_state_readers;
 
 }mem_struct;
 
@@ -75,6 +90,7 @@ typedef struct stats{
 //GLOBAL VARIABLES
 Config config;
 FILE *log_fp;
+int fd_named_pipe, fd_unnamed_pipe[2];
 int shmid; //shared memory id
 /*SHARED MEMORY*/
 mem_struct *shared_memory; 
@@ -83,16 +99,18 @@ car *cars;
 /********************/
 //semaphores
 sem_t* sem_log; //used to assure mutual exclusion when writing to log file and to stdout
-sem_t* sem_readers_in; //(mutex para proteger escrita em readers_in na shm) used to synchr writing and reading of new cars in shared memory
-sem_t* sem_readers_out; //(mutex para proteger escrita em readers_out na shm)^
+
+sem_t* sem_readers_in; //(mutex para proteger escrita em n_readers_in na shm) used to synchr writing and reading of new cars in shared memory
+sem_t* sem_readers_out; //mutex para proteger escrita em n_readers_out na shm
 sem_t* sem_writecar; //^
+
 sem_t* sem_write_race_state;
 sem_t* sem_mutex_race_state;
+
 sem_t* sem_malfunction_generator;
 
-char curr_time[9]; 
 
-struct sigaction sa;
+char curr_time[9]; 
 
 
 //FUNCTION DECLARATION
@@ -101,7 +119,8 @@ void malfunction_manager(void);
 void team_manager(int );
 void read_config(void);
 void update_curr_time(void);
-void destroy_all(void);
+void clean_resources(void);
+void shutdown_all(void);
 void init_log(void);
 void write_log(char *log, char*);
 void update_curr_time(void);
@@ -110,9 +129,9 @@ void *car_thread(void*);
 enum race_state_type get_race_state();
 void set_race_state();
 void print_stats();
-void sigtstp_handler();
-void sigint_sigusr1_handler(int signal);
-void add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consumption, int reliability);
+void handle_sigusr1();
+void handle_sigint_sigtstp(int sig);
+int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consumption, int reliability);
 void add_car_to_team(int i,int j,char* car_number, int speed, float consumption, int reliability);
 void add_team_to_shm(char *team_name, int i);
 void handle_addcar_command(char *command);
@@ -120,3 +139,4 @@ int is_valid_positive_float(char* str);
 int is_valid_integer(char *str);
 int validate_addcar_command(char *command, char *team_name, char* car_num, int *speed, float* cons, int *rel);
 void handle_command(char *command);
+void *named_pipe_reader();

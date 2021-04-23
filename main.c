@@ -2,12 +2,13 @@
 //Eduardo F. Ferreira Cruz 2018285164
 //Gonçalo Marinho Barroso 2019216314
 
+
+//echo "ADDCAR TEAM: A, CAR: 20, SPEED: 30, CONSUMPTION: 0.04, RELIABILITY: 95" > my_pipe
 #include "main.h"
 
 #define DEBUG 
 
 int main(void){
-
     //RACE SIMULATOR PROCESS (main process)
     
     //IMPORT CONFIG from file
@@ -24,11 +25,12 @@ int main(void){
     sem_unlink("SEM_LOG");
     sem_log=sem_open("SEM_LOG",O_CREAT|O_EXCL,0700,1); //binary semaphore
 
+/*
     //escrita e leitura da race_state (estado da corrida), em memória partilhada
     sem_unlink("SEM_WRITE_RACE_STATE");
     sem_write_race_state=sem_open("SEM_WRITE_RACE_STATE",O_CREAT|O_EXCL,0700,1); 
     sem_unlink("SEM_MUTEX_RACE_STATE");
-    sem_mutex_race_state=sem_open("SEM_MUTEX_RACE_STATE",O_CREAT|O_EXCL,0700,1); 
+    sem_mutex_race_state=sem_open("SEM_MUTEX_RACE_STATE",O_CREAT|O_EXCL,0700,1); */
 
     //escrita e leitura de carros da memoria partilhada (escrita por 1 race manager, lida por vários team manager's)
     sem_unlink("SEM_READERS_IN");
@@ -41,19 +43,30 @@ int main(void){
     //para bloquear/desbloquear gerador de avarias no processo malfunction_manager
     sem_unlink("SEM_MALFUNCTION_GENERATOR");
     sem_malfunction_generator=sem_open("SEM_MALFUNCTION_GENERATOR",O_CREAT|O_EXCL,0700,0);  
-
     
     #ifdef DEBUG
     printf("[DEBUG] semaphores created\n");
     #endif
+    /****************************/
+
 
     //INIT LOG file
     init_log();
     #ifdef DEBUG
     printf("[DEBUG] log file created/cleared\n");
     #endif
-    write_log("SIMULATOR STARTING","");
 
+    //NAMED PIPE
+    if ((mkfifo(PIPE_NAME, O_CREAT|O_EXCL|0600)<0)&&(errno!=EEXIST)){ //creates the named pipe if it doesn't exist yet
+        write_log("[ERROR] unable to create named pipe","");
+        shutdown_all(); 
+    }
+
+    signal(SIGINT,SIG_IGN); //set "all" processes to ignore SIGINT and 
+    signal(SIGTSTP,SIG_IGN); //.."all" processes ignore SIGTSTP
+    signal(SIGUSR1,SIG_IGN); //.."all" processes ignore SIGUSR1
+
+    write_log("SIMULATOR STARTING","");
 
     //create RACE MANAGER PROCESS
     if(fork()==0){
@@ -76,15 +89,13 @@ int main(void){
         exit(0);        
     }
 
+    //MAIN PROCESS (race simulator) captures and handles SIGINT and SIGTSTP
+    signal(SIGINT,handle_sigint_sigtstp); 
+    signal(SIGTSTP,handle_sigint_sigtstp);
+    #ifdef DEBUG
+    printf("[DEBUG] SIGINT and SIGTSTP ready to be handled in main process!\n");
+    #endif
 
-    //
-    sa.sa_flags=0;
-    sa.sa_handler=sigtstp_handler;
-    //captura sinal SIGTSTP
-    if(sigaction(SIGTSTP,&sa,NULL)==-1){
-        destroy_all();
-    }
-    //
 
     wait(NULL);wait(NULL); //esperar q os 2 processos filhos terminem
     #ifdef DEBUG
@@ -93,7 +104,8 @@ int main(void){
 
 
 
-    destroy_all(); 
+    shutdown_all(); 
+
     return 0;
 }
 
@@ -104,10 +116,11 @@ void handle_addcar_command(char *command){
     int speed, reliability;
     float consumption;
     int is_valid;
+    int sucess=0;
 
     is_valid=validate_addcar_command(command, team_name, car_number, &speed, &consumption, &reliability);
     if(is_valid==-1){
-        fprintf(stderr,"Error: buff size (9) exceeded for speed, consumption or reliability input\n");
+        //write_log("[ERROR] Buffer size (9) exceeded for speed, consumption or reliability command input","");
         write_log("WRONG COMMAND => ",command);
         return;
     }else if(is_valid==0){
@@ -120,24 +133,31 @@ void handle_addcar_command(char *command){
     //a ideia consiste em o writer indicar aos readers a sua necessidade de escrever. A partir daí nenhum reader pode entrar na zona critica.
     //ao sairem da zona critica cada reader verifica se o writer está waiting e o ultimo reader a sair liberta o writer para q ele possa entrar na zona e escrever
     //depois de escrever, o write liberta os readers q estão waiting para q eles possam novamente efetuar leitura
-    sem_wait(sem_readers_in);
-    sem_wait(sem_readers_out);
-    if(shared_memory->readers_in==shared_memory->readers_out){
+    sem_wait(sem_readers_in); //mutual exclusion for readers_in 
+    sem_wait(sem_readers_out); //and readers_out shm vars
+    if(shared_memory->readers_in==shared_memory->readers_out){ //se não houverem leitores na zona crítica 
+        shared_memory->readers_in=0;//reset
+        shared_memory->readers_out=0;//reset
         sem_post(sem_readers_out);
     }
-    else{
-        shared_memory->wt=1;//set flag = true
+    else{ //caso existam leitores na zona crítica
+        shared_memory->wait=1;//a flag wait é colocada a 1, não entram mais leitores na zona crítica e no momento em q todos os leitores q ainda estivessem na zona crítica, saírem, é feito sem_post(sem_write), para que se possa escrever
         sem_post(sem_readers_out);
         sem_wait(sem_writecar);
-        shared_memory->wt=0;        
+        shared_memory->wait=0; //reset        
     }
-    //WRITE
-    add_car_to_teams_shm(team_name,car_number,speed,consumption,reliability); //add car to shared memory (CRITICAL SECTION)
-    shared_memory->readers_in=0;//reset
-    shared_memory->readers_out=0;//reset
-    sem_post(sem_readers_in);
+    //WRITE (CRITICAL SECTION)
+    sucess=add_car_to_teams_shm(team_name,car_number,speed,consumption,reliability); //add car to shared memory 
 
-    write_log("NEW CAR LOADED => ",command);
+    sem_post(sem_readers_in); //podem entrar leitores
+
+    if(sucess){
+        pthread_mutex_lock(&shared_memory->mutex_race_state);
+        shared_memory->new_cars_counter++;
+        pthread_cond_broadcast(&shared_memory->race_state_cond);
+        pthread_mutex_unlock(&shared_memory->mutex_race_state);
+        write_log("NEW CAR LOADED => ",command);
+    }
 
 }
 
@@ -277,10 +297,10 @@ void add_car_to_team(int i,int j,char* car_number, int speed, float consumption,
 }
 
 
-void add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consumption, int reliability){
+int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consumption, int reliability){
     //verifica se já existe uma equipa com o nome team_name, no array de team's na SHM. Se existir, adiciona o car ao inicio da linked list que a struct team possui.
     //se n existir nenhuma equipa com esse nome e se ainda houver espaço para mais equipas, uma team é criada e adicionada à array de team's e o car é adicionado a essa team.
-    int i,j;
+    int i,j,k;
     for(i=0;i<shared_memory->curr_teams_qnt;i++){
         if(strcmp(teams[i].team_name,team_name)==0){
             break;
@@ -290,7 +310,7 @@ void add_car_to_teams_shm(char* team_name, char* car_number,int speed,float cons
         //n existe nenhuma team com a team_name ainda
         if(shared_memory->curr_teams_qnt==config.teams_qnt){
             write_log("UNABLE TO ADD MORE TEAMS, TEAM LIMIT EXCEEDED","");
-            return;
+            return 0; //FAILED
         } 
         add_team_to_shm(team_name,i);
         add_car_to_team(i,0,car_number,speed,consumption,reliability);
@@ -301,11 +321,16 @@ void add_car_to_teams_shm(char* team_name, char* car_number,int speed,float cons
     }
     else{
         //já existe team com este nome no index i
-        //insere o car no inicio da linked list (head);
         j=teams[i].curr_car_qnt;
         if(j==config.max_car_qnt_per_team){
             write_log("UNABLE TO ADD CAR, CAR LIMIT EXCEEDED FOR TEAM ",team_name);
-            return;
+            return 0; //FAILED
+        }
+        for(k=0;k<j;k++){
+            if(strcmp(cars[i*config.max_car_qnt_per_team+k].car_number,car_number)==0){
+                write_log("UNABLE TO ADD CAR, CAR ALREADY EXISTS IN TEAM ",team_name);
+                return 0; //FAILDE
+            }
         }
 
         add_car_to_team(i,j,car_number,speed,consumption,reliability);
@@ -314,10 +339,11 @@ void add_car_to_teams_shm(char* team_name, char* car_number,int speed,float cons
         printf("[DEBUG] CAR ADDED TO ALREADY EXISTING TEAM %s with consumption: %.2f ; speed : %d ; reliability : %d \n",teams[i].team_name,cars[i*config.max_car_qnt_per_team+j].consumption,cars[i*config.max_car_qnt_per_team+j].speed,cars[i*config.max_car_qnt_per_team+j].reliability);
         #endif
     }
+    return 1; //SUCESS
 }
 
 void start_race(){
-    //read cars from shared memory
+    //synchronized exacly like when reading car infos from shared-memory in team_manager process to create car threads etc
     sem_wait(sem_readers_in); 
     shared_memory->readers_in++;
     sem_post(sem_readers_in);
@@ -333,11 +359,10 @@ void start_race(){
 
     sem_wait(sem_readers_out);
     shared_memory->readers_out++;
-    if(shared_memory->wt==1 && shared_memory->readers_in==shared_memory->readers_out){
+    if(shared_memory->wait==1 && shared_memory->readers_in==shared_memory->readers_out){
         sem_post(sem_writecar);
     } 
     sem_post(sem_readers_out);
-
 }
 
 void race_manager(void){
@@ -346,6 +371,19 @@ void race_manager(void){
     //OS TEAM MANAGER PROCESSES VERIFICAM A SHM E CRIAM OS CARROS CONSOANTE A INFORMACAO Q LÁ FOI ESCRITA SOBRE OS CARROS
     int i;
     int teams_pid[config.teams_qnt];
+    fd_set read_set;
+    int n;
+    char buff[BUFF_SIZE];
+
+    //create/open UNNAMED PIPE
+    pipe(fd_unnamed_pipe);
+
+    //Open NAMED PIPE for reading
+    if((fd_named_pipe=open(PIPE_NAME,O_RDWR))<0){ //opens as 'read-write' so that the process doesnt block on open
+        write_log("[ERROR] unable to open named pipe for reading (in O_RDWR mode)","");
+        shutdown_all();
+    }
+
     //create TEAM MANAGER PROCESSes (1 per team)
     for(i=0;i<config.teams_qnt;i++){
         if((teams_pid[i]=fork())==0){
@@ -358,42 +396,39 @@ void race_manager(void){
             exit(0);
         }
     }
-
+    signal(SIGUSR1,handle_sigusr1); //catch and handle SIGUSR1 signal
     /***********************************/
-    //TODO:TESTING
-    char exemplo[1024]="ADDCAR TEAM: A, CAR: 20, SPEED: 30, CONSUMPTION: 0.04, RELIABILITY: 95";
-    handle_command(exemplo);
-    strcpy(exemplo,"ADDCAR TEAM: B, CAR: 078, SPEED: 20, CONSUMPTION: 0.09, RELIABILITY: 75");
-    handle_command(exemplo);
-    strcpy(exemplo,"ADDCAR TEAM: A, CAR: 08, SPEED: 25, CONSUMPTION: 0.05, RELIABILITY: 98");
-    handle_command(exemplo);
-    strcpy(exemplo,"ADDCAR TEAM: A, CAR: 098, SPEED: 25, CONSUMPTION: 0.05, RELIABILITY: 89"); //ERRO
-    handle_command(exemplo);
 
-    strcpy(exemplo,"START RACE!"); //ERRO
-    handle_command(exemplo);
+    #ifdef DEBUG  
+    printf("[DEBUG] LISTENING TO ALL PIPES!\n");
+    #endif
+    //could have used 2 threads for reading named pipe and/or unnamed pipe input
+    while(1){
 
-    strcpy(exemplo,"ADDCAR TEAM: C, CAR: 108, SPEED: 14, CONSUMPTION: 0.01, RELIABILITY: 98");
-    handle_command(exemplo);
-    strcpy(exemplo,"ADDCAR TEAM: J, CAR: 1, SPEED: 22, CONSUMPTION: 0.06, RELIABILITY: 90");
-    handle_command(exemplo);
-    strcpy(exemplo,"ADDCAR TEAM: W, 10 20 30"); //ERRO
-    handle_command(exemplo);
-    strcpy(exemplo,"ADDCAR TEAM: W, CAR: 66, SPEED: 17, CONSUMPTION: 0.03, RELIABILITY: 99");
-    handle_command(exemplo);
-    strcpy(exemplo,"ADDCAR TEAM: T, CAR: 66, SPEED: 17, CONSUMPTION: 0.05, RELIABILITY: 91"); //ERRO
-    handle_command(exemplo);
+        //I/O Multiplexing
+        FD_ZERO(&read_set);
+        FD_SET(fd_unnamed_pipe[0],&read_set);
+        FD_SET(fd_named_pipe,&read_set);
+        if(select(fd_named_pipe+1,&read_set,NULL,NULL,NULL)>0){
+            if(FD_ISSET(fd_named_pipe,&read_set)){
+                n=read(fd_named_pipe,buff,sizeof(buff));
+                buff[n-1] = '\0'; //put a \0 in the end of string
+                handle_command(buff);
+            }
+            if(FD_ISSET(fd_unnamed_pipe[0],&read_set)){
+                n=read(fd_unnamed_pipe[0],buff,sizeof(buff));
+                buff[n-1] = '\0'; //put a \0 in the end of string
 
-    strcpy(exemplo,"START RACE!"); 
-    handle_command(exemplo);
+            }
+        }
 
-    strcpy(exemplo,"ADDCAR TEAM: W, CAR: 982, SPEED: 17, CONSUMPTION: 0.03, RELIABILITY: 91"); //ERRO
-    handle_command(exemplo);
-    /**********************************/
+    }
 
-    
-    for(i=0;i<config.teams_qnt;i++) wait(NULL);    
+
+    for(i=0;i<config.teams_qnt;i++) wait(NULL);  
+    #ifdef DEBUG  
     printf("[DEBUG] all Team Manager processes ended\n");
+    #endif
     //TODO:processo resposavel pela gestao da corrida(inicio, fim, classificacao final) e das equipas em jogo.
 }
 
@@ -410,55 +445,75 @@ void handle_command(char *command){
         write_log("NEW COMMAND RECEIVED: START RACE","");
         start_race();
     }
+    else{
+        write_log("WRONG COMMAND => ",command);
+    }
 }
 
-void sigint_sigusr1_handler(int signal){
-    //sigint: aguardar q todos os carros cruzem a meta (mesmo q n seja a sa ultima volta), os carros q se encontram na box no momento da instrução devem terminar. aposto doso os carros concluirem a corrida deverá imprimir as estatisticas do jogo e terminal/libertar/remover todos os recursos utilizados
+void handle_sigusr1(){
+    //para interromper uma corrida q esteja a decorrer
+    //a corrida deverá terminar mal todos os carros cheguem à meta (como acontece com o SIGINT)
+    //e a sua estatistica final deve ser apresentada.
+    //a informacao da interrupcao deve ser escrita no log 
+    //(nao termina o programa, se start race for escrito, a corrida poderá ser novamente iniciada)
+    //TODO:
+    #ifdef DEBUG  
+    printf("[DEBUG] SIGUSR1 CATCHED!\n");
+    #endif
+    write_log("SIGNAL SIGUSR1 RECEIVED","");
+
+    if(get_race_state()==ON){
+        //set_race_state(PAUSE); 
+        //TODO: TERMINAR CORRIDA COMO CTRL+C 
+        write_log("RACE INTERRUPTED! WAIT FOR ALL CARS TO REACH FINISH LINE","");
+    }
+    //...
     
-    //sigusr1:  para interromper uma corrida q esteja a decorrer. a corrida deverá terminar mal todos os carros cheguem à meta (como acontece com o SIGINT) e a sua estatistica final deve ser apresentada. a informacao da interrupcao deve ser escrita no log (nao termina o programa, se start race for escrito, volta a iniciar uma corrida)
 }
 
-void sigtstp_handler(){ 
-    //imprime estatisticas
-    print_stats();
+void handle_sigint_sigtstp(int signum){ //no processo main
+    if(signum==SIGINT){
+        #ifdef DEBUG  
+        printf("[DEBUG] SIGINT CATCHED!\n");
+        #endif
+        write_log("SIGNAL SIGINT RECEIVED","");
+        //sigint: aguardar q todos os carros cruzem a meta (mesmo q n seja a sa ultima volta), os carros q se encontram na box no momento da instrução devem terminar. aposto doso os carros concluirem a corrida deverá imprimir as estatisticas do jogo e terminal/libertar/remover todos os recursos utilizados
+        //aguardar q todos os carros cruzem a meta (mesmo q n seja a sua ultima volta)
+        //os carros q se encontram na box neste momento devem terminar
+        //após todos os carros concluirem a corrida imprimir as estatisticas, terminar,libertar e remover todos os recursos utilizados
+        //TODO:
+        write_log("RACE INTERRUPTED! WAIT FOR ALL CARS TO REACH FINISH LINE","");
+        //TODO:
+        shutdown_all();
+    }else if(signum==SIGTSTP){
+        #ifdef DEBUG  
+        printf("[DEBUG] SIGTSTP CATCHED!\n");
+        #endif
+        write_log("SIGNAL SIGTSTP RECEIVED","");
+        print_stats(); //imprime estatisticas
+    }
 }
+
 
 void set_race_state(enum race_state_type state){
-    //só pode aceder um processo de cada vez à variavel shared_variable->race_flag, para escrita 
-    //problema clássico do escritor/leitor
-    //neste caso damos prioridade aos leitores 
-    sem_wait(sem_write_race_state); //exclusão mutua
+    pthread_mutex_lock(&shared_memory->mutex_race_state); //exclusão mutua
     shared_memory->race_state=state; //write (zona critica)
-    sem_post(sem_write_race_state); 
+    pthread_cond_broadcast(&shared_memory->race_state_cond); //notify all waiting threads/processes
+    pthread_mutex_unlock(&shared_memory->mutex_race_state);
     if(state==ON){
-        //if race is set to start, release lock on malfunctions generator in malfunction manager process
+        //if race is set to start (ON), release lock on malfunctions generator in malfunction manager process
         sem_post(sem_malfunction_generator);
     }else{
-        //if race is set to pause or to end, grab lock (pause malfunctions generator) 
+        //if race is OFF, grab lock (pause malfunctions generator) 
         sem_wait(sem_malfunction_generator); 
     }
 }
 
 enum race_state_type get_race_state(){
-    //todos os processos podem ler a variável shared_variable->race_flag (desde q nenhum processo esteja a escrever nela!)  
     int state;
-
-    sem_wait(sem_mutex_race_state); //mutex
-    shared_memory->race_state_readers++; 
-    if(shared_memory->race_state_readers==1){ //first reader
-        sem_wait(sem_write_race_state); //block writing 
-    }
-    sem_post(sem_mutex_race_state);
-
+    pthread_mutex_lock(&shared_memory->mutex_race_state);
     state=shared_memory->race_state; //READ
-
-    sem_wait(sem_mutex_race_state); //mutex
-    shared_memory->race_state_readers--; 
-    if(shared_memory->race_state_readers==0){ //no reader
-        sem_post(sem_write_race_state); //block writing 
-    }
-    sem_post(sem_mutex_race_state);
-   
+    pthread_mutex_unlock(&shared_memory->mutex_race_state);
     return state;
 }
 
@@ -470,11 +525,22 @@ void team_manager(int team_id){
     //car threads sao criadas através da receção de comandos através do named pipe 
 
     int *cars_index;
-    int i=0;
+    int i=0; //team's current car count (in process)
 
 	cars_index = (int*)malloc(sizeof(int)*(config.max_car_qnt_per_team)); //heap
-
-    do{
+    close(fd_unnamed_pipe[0]); //close unnamed pipe reading file descriptor
+    while(1){
+        printf("--------wasting.cpu.?\n");
+        pthread_mutex_lock(&shared_memory->mutex_race_state);
+        while(shared_memory->new_cars_counter==0 || shared_memory->race_state==OFF){
+            pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
+        }
+        if(shared_memory->race_state==OFF){
+            pthread_mutex_unlock(&shared_memory->mutex_race_state);
+            break; //stop loading cars
+        }
+        pthread_mutex_unlock(&shared_memory->mutex_race_state);
+        
         //read cars from shared memory
         sem_wait(sem_readers_in); 
         shared_memory->readers_in++;
@@ -482,38 +548,45 @@ void team_manager(int team_id){
 
         //verificar se já existe registo da team i através do curr_team_qnt 
         //se sim, LER CARROs e criar threads
-        //TODO: 
-        //exemplo: esta equipa tem o nr 0. Se a current qnt de equipas for 0, é pq esta equipa ainda n foi criada através do named pipe
+        //EXEMPLO: esta equipa tem o nr 0. Se a current qnt de equipas for 0, é pq esta equipa ainda n foi criada através do named pipe
         //logo não se faz nada. Se a curr qnt de equipas fosse 2, é pq já existe a equipa com o nr 0 na shared memory, logo é necessário verificar se esta já tem carros e se tiver, criar as respetivas threads!
         //por outro lado se o nr de carros q a equipa tem na shared memory for superior a i, então é porque faltam criar threads para os carros
-        
         if(shared_memory->curr_teams_qnt>=team_id+1){
             if(teams[team_id].curr_car_qnt>=i+1){
                 while(i<teams[team_id].curr_car_qnt){
-                    cars_index[i]=team_id*config.max_car_qnt_per_team+i; //index in shm memory array of cars
+                    cars_index[i]=team_id*config.max_car_qnt_per_team+i; //index in shm memory's array of cars
                     printf("car name: %s\n",cars[team_id*config.max_car_qnt_per_team+i].car_number);
 		            if(pthread_create(&cars[team_id*config.max_car_qnt_per_team+i].thread,NULL,car_thread,&cars_index[i])==-1){
                         //erro
-                        fprintf(stderr,"Error: unable to create car thread\n");
-                        destroy_all();
+                        write_log("[ERROR] unable to create car thread","");
+                        shutdown_all();
                     }
                     i++;
+                    pthread_mutex_lock(&shared_memory->mutex_race_state); //reuse mutex
+                    shared_memory->new_cars_counter--; //protected
+                    pthread_mutex_unlock(&shared_memory->mutex_race_state);
+
                     #ifdef DEBUG
                     printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM %s !\n",teams[team_id].team_name);
                     #endif
                 }
             }
         }
+        
+        else{
+            printf("------->>>> team %d wasting CPU....!\n",team_id);
+        }
 
         sem_wait(sem_readers_out);
         shared_memory->readers_out++;
-        if(shared_memory->wt==1 && shared_memory->readers_in==shared_memory->readers_out){
+        if(shared_memory->wait==1 && shared_memory->readers_in==shared_memory->readers_out){
             sem_post(sem_writecar);
         } 
         sem_post(sem_readers_out);
 
-    }while(get_race_state()==OFF); //antes da corrida começar
+    }//antes da corrida começar
 
+    printf("TEAM %d DETETOU Q A CORRIDA COMECOU!\n",team_id);
 
    /* pthread_exit(NULL); */
     for(int j=0;j<i;j++) pthread_join(cars[team_id*config.max_car_qnt_per_team+j].thread,NULL); //wait for threads to end
@@ -554,13 +627,13 @@ void malfunction_manager(void){
                 }
             }
         }
-        /*********************************/
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+
+        /***************************************/                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
         if(malfunction_count>10){
             sem_post(sem_malfunction_generator);
             break;
         }
-        /*********************************/
+        /***************************************/
 
         sem_post(sem_malfunction_generator);
     }
@@ -568,44 +641,71 @@ void malfunction_manager(void){
 }
 
 void init_shared_memory(void){
+    //cond_vars and mutexes created using static initialization cannot be used between processes!
+    pthread_mutexattr_t attrmutex;
+    pthread_condattr_t attrcondv;
     
     //SHM Create
 	if ((shmid=shmget(IPC_PRIVATE,sizeof(mem_struct)+config.teams_qnt*sizeof(team)+config.teams_qnt*config.max_car_qnt_per_team*sizeof(car),IPC_CREAT|0700)) < 0){
-		fprintf(stderr,"Error: in shmget with IPC_CREAT\n");
+        write_log("[ERROR] in shmget with IPC_CREAT","");
 		exit(-1);
 	} 
     //SHM Attach
     if((shared_memory=(mem_struct*)shmat(shmid,NULL,0))==(mem_struct*)-1){
-        fprintf(stderr,"Error: in shmat\n");
+        write_log("[ERROR] in shmat","");
         exit(-1);
     }
 
     shared_memory->race_state=OFF; 
     shared_memory->curr_teams_qnt=0; 
-    shared_memory->wt=0; shared_memory->readers_in=0; shared_memory->readers_out=0;
+    shared_memory->wait=0; shared_memory->readers_in=0; shared_memory->readers_out=0;
+    shared_memory->new_cars_counter=0;
     
     teams=(team*)(shared_memory+1);
     cars=(car*)(teams+config.teams_qnt);
+
+    //init mutex and condition variable used between processes 
+    pthread_mutexattr_init(&attrmutex); //Initialize attribute of mutex
+    pthread_mutexattr_setpshared(&attrmutex, PTHREAD_PROCESS_SHARED);
+    pthread_condattr_init(&attrcondv); //Initialize attribute of condition variable
+    pthread_condattr_setpshared(&attrcondv, PTHREAD_PROCESS_SHARED);
+    //note: these ^ attrs can be used to init multiple mutexes and cond vars
+    pthread_mutex_init(&shared_memory->mutex_race_state, &attrmutex); //init mutex
+    pthread_cond_init(&shared_memory->race_state_cond, &attrcondv); //init cond var
+
+    pthread_mutexattr_destroy(&attrmutex); 
+    pthread_condattr_destroy(&attrcondv);
 }
 
 void print_stats(){
-    ;
+    return;
 }
 
-void destroy_all(void){
-    write_log("SIMULATOR CLOSING","");
+void clean_resources(){
+    signal(SIGINT, SIG_IGN); //ignore sigint signals
+
+    pthread_mutex_destroy(&shared_memory->mutex_race_state);
+    pthread_cond_destroy(&shared_memory->race_state_cond);
 
     //SHARED MEMORY
-    shmdt(shared_memory); //detach
-    shmctl(shmid,IPC_RMID,NULL); //destroy
+    if(shmid>=0){
+        shmdt(shared_memory); //detach
+        shmctl(shmid,IPC_RMID,NULL); //destroy
+    }
+    
     
     //SEMAPHOREs 
-    sem_close(sem_log);	//destroy the semaphore
-	sem_unlink("SEM_LOG");
+    if(sem_log>=0){
+       sem_close(sem_log);	//destroy the semaphore
+	    sem_unlink("SEM_LOG"); 
+    }
+    //fazer para o resto
+    
+    /*
     sem_close(sem_write_race_state);
     sem_unlink("SEM_WRITE_RACE_STATE");
     sem_close(sem_mutex_race_state);
-    sem_unlink("SEM_MUTEX_RACE_STATE");
+    sem_unlink("SEM_MUTEX_RACE_STATE");*/
     sem_close(sem_readers_in);
     sem_unlink("SEM_READERS_IN");
     sem_close(sem_readers_out);
@@ -618,20 +718,43 @@ void destroy_all(void){
     //pthread_mutex_destroy(&mutex);
     //pthread_cond_destroy(&cond);
 
-
-    //TODO: Não esquecer de chamar no final o kill_ipcs.sh dado pelo prof!
-
+    //unlink named pipe
+    unlink(PIPE_NAME);
+    //close unnamed pipes file descriptors
+    close(fd_unnamed_pipe[0]); //fd for reading
+    close(fd_unnamed_pipe[1]); //fd for writing
 
     //close log file
     fclose(log_fp);
 
     system("./kill_ipcs.sh");
 
+    #ifdef DEBUG
+    printf("[DEBUG] sucessfuly cleaned everything!\n");
+    #endif
+
+}
+
+void shutdown_all(void){
+    write_log("SIMULATOR CLOSING","");
+
+    //kill(pid[0], SIGKILL); //kill process
+    
+    //while (wait(NULL) != -1); //<-----
+
+    clean_resources(); 
+    //pthread_mutex_destroy(&mutex);
+    //pthread_cond_destroy(&cond);
+
 
     #ifdef DEBUG
-    printf("[DEBUG] sucessfuly destroyed everything!\n");
+    printf("[DEBUG] SHUTTED DOWN!\n");
     #endif
-    
+
+    //TODO: matar todos os processos e threads
+
+    system("killall -9 main");
+    exit(0);
 }
 
 void update_curr_time(void){
@@ -648,8 +771,8 @@ void write_log(char *log,char *concat){
     int len0=strlen(log);
     int len1=strlen(concat);
     if((aux_buff=(char*)malloc((len0+len1+1)*sizeof(char)))==NULL){
-        fprintf(stderr,"Error: allocating memory for log buffer(malloc)\n");
-        destroy_all();
+        write_log("[ERROR] allocating memory for log buffer(malloc)","");
+        shutdown_all();
     }
     strcpy(aux_buff,log);
     aux_buff[len0]=0;
@@ -660,7 +783,7 @@ void write_log(char *log,char *concat){
     
     //synchronized
     if(sem_wait(sem_log)==-1){
-        destroy_all(); //end
+        shutdown_all(); //end
     }
 
     update_curr_time();
@@ -670,7 +793,7 @@ void write_log(char *log,char *concat){
     fflush(log_fp);
 
     if(sem_post(sem_log)==-1){
-        destroy_all(); //end
+        shutdown_all(); //end
     } 
 
     free(aux_buff);
@@ -679,7 +802,7 @@ void write_log(char *log,char *concat){
 void init_log(void){
     //create/reset log file 
     if((log_fp=fopen(LOG_FILENAME,"w"))==NULL){
-        fprintf(stderr,"Error: creating %s file\n",LOG_FILENAME);
+        write_log("[ERROR] creating file ",LOG_FILENAME);
         exit(-1);
     }
 }
@@ -691,116 +814,116 @@ void read_config(void){
     int len;
 
     if((fp=fopen(CONFIG_FILENAME,"r"))==NULL){
-        fprintf(stderr,"Error: opening %s file\n",CONFIG_FILENAME);
+        write_log("[ERROR] opening file ",CONFIG_FILENAME);
         exit(-1);
     }
     //allocate aux buffer
     if((aux=(char*)malloc(size*sizeof(char)))==NULL){
-        fprintf(stderr,"Error: unable to allocate aux buffer\n");
+        write_log("[ERROR] allocating aux buffer","");
         fclose(fp);
         exit(-1);
     }
     //read file formatted lines
     //1st line
     if((len=getline(&aux,&size,fp))==-1){
-        fprintf(stderr,"Error: reading line from %s file\n",CONFIG_FILENAME);
+        write_log("[ERROR] reading 1st line from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     aux[len]='\0';
     if(sscanf(aux,"%d",&(config.time_unit))!=1){
-        fprintf(stderr,"Error: anomality in %s file structure\n",CONFIG_FILENAME);
+        write_log("[ERROR] anomality in expected structure from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     //2nd line
     if((len=getline(&aux,&size,fp))==-1){
-        fprintf(stderr,"Error: reading line from %s file\n",CONFIG_FILENAME);
+        write_log("[ERROR] reading 2nd line from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     aux[len]='\0';
     if(sscanf(aux,"%d, %d",&(config.track_len),&(config.laps_qnt))!=2){
-        fprintf(stderr,"Error: anomality in %s file structure\n",CONFIG_FILENAME);
+        write_log("[ERROR] anomality in expected structure from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     //3rd line
     if((len=getline(&aux,&size,fp))==-1){
-        fprintf(stderr,"Error: reading line from %s file\n",CONFIG_FILENAME);
+        write_log("[ERROR] reading 3rd line from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     aux[len]='\0';
     if(sscanf(aux,"%d",&(config.teams_qnt))!=1){
-        fprintf(stderr,"Error: anomality in %s file structure\n",CONFIG_FILENAME);
+        write_log("[ERROR] anomality in expected structure from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     if(config.teams_qnt<3){
-        fprintf(stderr,"Error: invalid config parameter [line 3] \n\t-> got %d teams, 3 or more are required\n",config.teams_qnt);
+        write_log("[ERROR] invalid config parameter (line 3 -> number of teams), 3 or more teams are required! Correct file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     //4th line
     if((len=getline(&aux,&size,fp))==-1){
-        fprintf(stderr,"Error: reading line from %s file\n",CONFIG_FILENAME);
+        write_log("[ERROR] reading 4th line from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     aux[len]='\0';
     if(sscanf(aux,"%d",&(config.max_car_qnt_per_team))!=1){
-        fprintf(stderr,"Error: anomality in %s file structure\n",CONFIG_FILENAME);
+        write_log("[ERROR] anomality in expected structure from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     //5th line
     if((len=getline(&aux,&size,fp))==-1){
-        fprintf(stderr,"Error: reading line from %s file\n",CONFIG_FILENAME);
+        write_log("[ERROR] reading 5th line from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     aux[len]='\0';
     if(sscanf(aux,"%d",&(config.avaria_time_interval))!=1){
-        fprintf(stderr,"Error: anomality in %s file structure\n",CONFIG_FILENAME);
+        write_log("[ERROR] anomality in expected structure from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     //6th line
     if((len=getline(&aux,&size,fp))==-1){
-        fprintf(stderr,"Error: reading line from %s file\n",CONFIG_FILENAME);
+        write_log("[ERROR] reading 6th line from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     aux[len]='\0';
     if(sscanf(aux,"%d, %d",&(config.reparacao_min_time),&(config.reparacao_max_time))!=2){
-        fprintf(stderr,"Error: anomality in %s file structure\n",CONFIG_FILENAME);
+        write_log("[ERROR] anomality in expected structure from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     //last line
     if((len=getline(&aux,&size,fp))==-1){
-        fprintf(stderr,"Error: reading line from %s file\n",CONFIG_FILENAME);
+        write_log("[ERROR] reading 7th line from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
     }
     aux[len]='\0';
     if(sscanf(aux,"%d",&(config.fuel_capacity))!=1){
-        fprintf(stderr,"Error: anomality in %s file structure\n",CONFIG_FILENAME);
+        write_log("[ERROR] anomality in expected structure from file ",CONFIG_FILENAME);
         fclose(fp);
         free(aux);
         exit(-1);
