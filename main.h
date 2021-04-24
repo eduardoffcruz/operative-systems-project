@@ -50,7 +50,7 @@ typedef struct mem_struct{
     int readers_in;
     int readers_out;
     int wait;
-    int new_cars_counter;
+    int new_car_team; //indicação da equipa onde foi adicionado o novo carro
 
     pthread_mutex_t mutex_race_state;
     pthread_cond_t race_state_cond;

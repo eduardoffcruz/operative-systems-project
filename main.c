@@ -40,9 +40,10 @@ int main(void){
     sem_unlink("SEM_WRITECAR");
     sem_writecar=sem_open("SEM_WRITECAR",O_CREAT|O_EXCL,0700,0);  
 
+/*
     //para bloquear/desbloquear gerador de avarias no processo malfunction_manager
     sem_unlink("SEM_MALFUNCTION_GENERATOR");
-    sem_malfunction_generator=sem_open("SEM_MALFUNCTION_GENERATOR",O_CREAT|O_EXCL,0700,0);  
+    sem_malfunction_generator=sem_open("SEM_MALFUNCTION_GENERATOR",O_CREAT|O_EXCL,0700,0);  */
     
     #ifdef DEBUG
     printf("[DEBUG] semaphores created\n");
@@ -116,7 +117,7 @@ void handle_addcar_command(char *command){
     int speed, reliability;
     float consumption;
     int is_valid;
-    int sucess=0;
+    int team_index=0;
 
     is_valid=validate_addcar_command(command, team_name, car_number, &speed, &consumption, &reliability);
     if(is_valid==-1){
@@ -147,13 +148,13 @@ void handle_addcar_command(char *command){
         shared_memory->wait=0; //reset        
     }
     //WRITE (CRITICAL SECTION)
-    sucess=add_car_to_teams_shm(team_name,car_number,speed,consumption,reliability); //add car to shared memory 
+    team_index=add_car_to_teams_shm(team_name,car_number,speed,consumption,reliability); //add car to shared memory 
 
     sem_post(sem_readers_in); //podem entrar leitores
 
-    if(sucess){
+    if(team_index!=-1){
         pthread_mutex_lock(&shared_memory->mutex_race_state);
-        shared_memory->new_cars_counter++;
+        shared_memory->new_car_team=team_index;
         pthread_cond_broadcast(&shared_memory->race_state_cond);
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
         write_log("NEW CAR LOADED => ",command);
@@ -310,7 +311,7 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
         //n existe nenhuma team com a team_name ainda
         if(shared_memory->curr_teams_qnt==config.teams_qnt){
             write_log("UNABLE TO ADD MORE TEAMS, TEAM LIMIT EXCEEDED","");
-            return 0; //FAILED
+            return -1; //FAILED
         } 
         add_team_to_shm(team_name,i);
         add_car_to_team(i,0,car_number,speed,consumption,reliability);
@@ -324,12 +325,12 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
         j=teams[i].curr_car_qnt;
         if(j==config.max_car_qnt_per_team){
             write_log("UNABLE TO ADD CAR, CAR LIMIT EXCEEDED FOR TEAM ",team_name);
-            return 0; //FAILED
+            return -1; //FAILED
         }
         for(k=0;k<j;k++){
             if(strcmp(cars[i*config.max_car_qnt_per_team+k].car_number,car_number)==0){
                 write_log("UNABLE TO ADD CAR, CAR ALREADY EXISTS IN TEAM ",team_name);
-                return 0; //FAILDE
+                return -1; //FAILDE
             }
         }
 
@@ -339,7 +340,7 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
         printf("[DEBUG] CAR ADDED TO ALREADY EXISTING TEAM %s with consumption: %.2f ; speed : %d ; reliability : %d \n",teams[i].team_name,cars[i*config.max_car_qnt_per_team+j].consumption,cars[i*config.max_car_qnt_per_team+j].speed,cars[i*config.max_car_qnt_per_team+j].reliability);
         #endif
     }
-    return 1; //SUCESS
+    return i; //SUCESS
 }
 
 void start_race(){
@@ -500,13 +501,6 @@ void set_race_state(enum race_state_type state){
     shared_memory->race_state=state; //write (zona critica)
     pthread_cond_broadcast(&shared_memory->race_state_cond); //notify all waiting threads/processes
     pthread_mutex_unlock(&shared_memory->mutex_race_state);
-    if(state==ON){
-        //if race is set to start (ON), release lock on malfunctions generator in malfunction manager process
-        sem_post(sem_malfunction_generator);
-    }else{
-        //if race is OFF, grab lock (pause malfunctions generator) 
-        sem_wait(sem_malfunction_generator); 
-    }
 }
 
 enum race_state_type get_race_state(){
@@ -532,14 +526,15 @@ void team_manager(int team_id){
     while(1){
         printf("--------wasting.cpu.?\n");
         pthread_mutex_lock(&shared_memory->mutex_race_state);
-        while(shared_memory->new_cars_counter==0 || shared_memory->race_state==OFF){
+        while(shared_memory->new_car_team!=team_id && shared_memory->race_state==OFF){
             pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
-        }
-        if(shared_memory->race_state==OFF){
+        }shared_memory->new_car_team=-1;//reset
+        if(shared_memory->race_state==ON){
             pthread_mutex_unlock(&shared_memory->mutex_race_state);
             break; //stop loading cars
         }
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
+        
         
         //read cars from shared memory
         sem_wait(sem_readers_in); 
@@ -562,9 +557,6 @@ void team_manager(int team_id){
                         shutdown_all();
                     }
                     i++;
-                    pthread_mutex_lock(&shared_memory->mutex_race_state); //reuse mutex
-                    shared_memory->new_cars_counter--; //protected
-                    pthread_mutex_unlock(&shared_memory->mutex_race_state);
 
                     #ifdef DEBUG
                     printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM %s !\n",teams[team_id].team_name);
@@ -610,7 +602,13 @@ void malfunction_manager(void){
     int i,j;
     int malfunction_count=0;
     while(1){
-        sem_wait(sem_malfunction_generator); 
+        pthread_mutex_lock(&shared_memory->mutex_race_state);
+        while(shared_memory->race_state==OFF){ //fica em espera enquanto a corrida não começa
+            pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
+        }
+        pthread_mutex_unlock(&shared_memory->mutex_race_state);
+
+        //sem_wait(sem_malfunction_generator); 
         sleep(config.avaria_time_interval/config.time_unit); 
         //all this values can be acessed during RACE time because, 
         //no changes are made or allowed to be made, to this values, during race time. 
@@ -628,15 +626,15 @@ void malfunction_manager(void){
             }
         }
 
-        /***************************************/                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+        /***************************************/                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
         if(malfunction_count>10){
-            sem_post(sem_malfunction_generator);
             break;
         }
         /***************************************/
 
-        sem_post(sem_malfunction_generator);
+        //sem_post(sem_malfunction_generator);
     }
+    printf("malfunction manager exited");
     
 }
 
@@ -659,7 +657,7 @@ void init_shared_memory(void){
     shared_memory->race_state=OFF; 
     shared_memory->curr_teams_qnt=0; 
     shared_memory->wait=0; shared_memory->readers_in=0; shared_memory->readers_out=0;
-    shared_memory->new_cars_counter=0;
+    shared_memory->new_car_team=-1;
     
     teams=(team*)(shared_memory+1);
     cars=(car*)(teams+config.teams_qnt);
@@ -712,8 +710,9 @@ void clean_resources(){
     sem_unlink("SEM_READERS_OUT");
     sem_close(sem_writecar);
     sem_unlink("SEM_WRITECAR");
+    /*
     sem_close(sem_malfunction_generator);
-    sem_unlink("SEM_MALFUNCTION_GENERATOR");
+    sem_unlink("SEM_MALFUNCTION_GENERATOR");*/
 
     //pthread_mutex_destroy(&mutex);
     //pthread_cond_destroy(&cond);
