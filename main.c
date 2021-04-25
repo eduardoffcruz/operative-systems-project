@@ -25,7 +25,7 @@ int main(void){
     sem_unlink("SEM_LOG");
     sem_log=sem_open("SEM_LOG",O_CREAT|O_EXCL,0700,1); //binary semaphore
 
-/*
+    /*
     //escrita e leitura da race_state (estado da corrida), em memória partilhada
     sem_unlink("SEM_WRITE_RACE_STATE");
     sem_write_race_state=sem_open("SEM_WRITE_RACE_STATE",O_CREAT|O_EXCL,0700,1); 
@@ -38,7 +38,8 @@ int main(void){
     sem_unlink("SEM_READERS_OUT");
     sem_readers_out=sem_open("SEM_READERS_OUT",O_CREAT|O_EXCL,0700,1); 
     sem_unlink("SEM_WRITECAR");
-    sem_writecar=sem_open("SEM_WRITECAR",O_CREAT|O_EXCL,0700,0);  */
+    sem_writecar=sem_open("SEM_WRITECAR",O_CREAT|O_EXCL,0700,0);  
+    */
 
     sem_unlink("SEM_STOP_RACE_READERS_IN");
     sem_stop_race_readers_in=sem_open("SEM_STOP_RACE_READERS_IN",O_CREAT|O_EXCL,0700,1)
@@ -67,6 +68,9 @@ int main(void){
     #ifdef DEBUG
     printf("[DEBUG] log file created/cleared\n");
     #endif
+
+    //allocate space for UNNAMED PIPEs file descriptors
+    if(fd_unnamed_pipe=(int(*)[2])malloc(config.teams_qnt*sizeof(*fd_unnamed_pipe));
 
     //NAMED PIPE
     if ((mkfifo(PIPE_NAME, O_CREAT|O_EXCL|0600)<0)&&(errno!=EEXIST)){ //creates the named pipe if it doesn't exist yet
@@ -275,10 +279,29 @@ void add_team_to_shm(char *team_name, int i){
     int len=strlen(team_name);
     memcpy(teams[i].team_name,team_name,len*sizeof(char));
     teams[i].team_name[len]='\0';
-    teams[i].box_state=LIVRE; //TODO:
     teams[i].curr_car_qnt=0;
 
     shared_memory->curr_teams_qnt++;
+
+    //BOX
+    teams[i].box_state=LIVRE; 
+    teams[i].cars_in_safety_mode=0;
+    teams[i].car_in_box=0;
+    //TODO: 
+    /*
+    pthread_mutexattr_t attrmutex;
+    pthread_condattr_t attrcondv;
+    pthread_mutexattr_init(&attrmutex); //Initialize attribute of mutex
+    pthread_mutexattr_setpshared(&attrmutex, PTHREAD_PROCESS_SHARED);
+    pthread_condattr_init(&attrcondv); //Initialize attribute of condition variable
+    pthread_condattr_setpshared(&attrcondv, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(&teams[i].mutex_car_changed_state, &attrmutex); //init mutex
+    pthread_cond_init(&teams[i].car_changed_state_cond, &attrcondv); //init cond var
+    pthread_mutexattr_destroy(&attrmutex); 
+    pthread_condattr_destroy(&attrcondv);*/
+
+    //teams[i].mutex_car_changed_state=PTHREAD_MUTEX_INITIALIZER; //macro
+    //teams[i].car_changed_state_cond=PTHREAD_COND_INITIALIZER; //TODO: VERIFICAR Q EFETIVAMENTE ISTO FUNCIONA ENTRE O PROCESSO E OS SEUS CARROS
 }
 
 void add_car_to_team(int i,int j,char* car_number, int speed, float consumption, int reliability){
@@ -373,18 +396,13 @@ void race_manager(void){
     char buff[BUFF_SIZE];
     struct notification notif;
 
-    //create/open UNNAMED PIPE
-    pipe(fd_unnamed_pipe);
-
-    //Open NAMED PIPE for reading
-    if((fd_named_pipe=open(PIPE_NAME,O_RDWR))<0){ //opens as 'read-write' so that the process doesnt block on open
-        write_log("[ERROR] unable to open named pipe for reading (in O_RDWR mode)");
-        shutdown_all();
-    }
+    
 
     //create TEAM MANAGER PROCESSes (1 per team)
     for(i=0;i<config.teams_qnt;i++){
         if((teams_pid[i]=fork())==0){
+            //create/open UNNAMED PIPE
+            pipe(fd_unnamed_pipe[i]);
             #ifdef DEBUG
             printf("[DEBUG] Race Manager [pid:%d] created Team %d process [pid:%d]!\n",getppid(),i,getpid());
             #endif
@@ -396,6 +414,12 @@ void race_manager(void){
     }
     signal(SIGUSR1,handle_sigusr1); //catch and handle SIGUSR1 signal
     /***********************************/
+    
+    //Open NAMED PIPE for reading
+    if((fd_named_pipe=open(PIPE_NAME,O_RDWR))<0){ //opens as 'read-write' so that the process doesnt block on open
+        write_log("[ERROR] unable to open named pipe for reading (in O_RDWR mode)");
+        shutdown_all();
+    }
 
     #ifdef DEBUG  
     printf("[DEBUG] LISTENING TO ALL PIPES!\n");
@@ -405,7 +429,9 @@ void race_manager(void){
 
         //I/O Multiplexing
         FD_ZERO(&read_set);
-        FD_SET(fd_unnamed_pipe[0],&read_set);
+        for(i=0;i<config.teams_qnt;i++){
+            FD_SET(fd_unnamed_pipe[i][0],&read_set);
+        }
         FD_SET(fd_named_pipe,&read_set);
         if(select(fd_named_pipe+1,&read_set,NULL,NULL,NULL)>0){
             if(FD_ISSET(fd_named_pipe,&read_set)){
@@ -413,10 +439,12 @@ void race_manager(void){
                 buff[n-1] = '\0'; //put a \0 in the end of string
                 handle_command(buff);
             }
-            if(FD_ISSET(fd_unnamed_pipe[0],&read_set)){
-                read(fd_unnamed_pipe[0], &notif, sizeof(struct notification));
-                sprintf(buff,"CAR NUMBER [%s] FROM TEAM %s CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[cars[notif.car_index].team_index].team_name,car_state_to_str(notif.car_state));
-                write_log(buff);
+            for(i=0;i<config.teams_qnt;i++){
+                if(FD_ISSET(fd_unnamed_pipe[i][0],&read_set)){
+                    read(fd_unnamed_pipe[i][0], &notif, sizeof(struct notification));
+                    sprintf(buff,"CAR NUMBER [%s] FROM TEAM %s CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[cars[notif.car_index].team_index].team_name,car_state_to_str(notif.car_state));
+                    write_log(buff);
+                }
             }
         }
 
@@ -535,12 +563,17 @@ void team_manager(int team_id){
     //TODO: team manager escreve as informações de cada carro, recebidas do Named Pipe, na shared_emmory
     //TODO: manter atualizada na shared_memory, o estado da box! (LIVRE;OCUPADA;RESERVADA)
     //car threads sao criadas através da receção de comandos através do named pipe 
-
     int *cars_index;
     int i=0; //team's current car count (in process)
 
 	cars_index = (int*)malloc(sizeof(int)*(config.max_car_qnt_per_team)); //heap
-    close(fd_unnamed_pipe[0]); //close unnamed pipe reading file descriptor
+
+    close(fd_unnamed_pipe[team_id][0]); //close unnamed pipe reading file descriptor
+
+    teams[team_id].mutex_car_changed_state=PTHREAD_MUTEX_INITIALIZER; //INIT MUTEX
+    teams[team_id].car_changed_state_cond=PTHREAD_COND_INITIALIZER; //INIT COND VAR
+    teams[team_id].mutex_write_to_unnamed_pipe=PTHREAD_MUTEX_INITIALIZER; //INIT MUTEX
+
     while(1){
         printf("--------wasting.cpu.?\n");
         pthread_mutex_lock(&shared_memory->mutex_race_state);
@@ -571,12 +604,18 @@ void team_manager(int team_id){
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
 
     }//antes da corrida começar
-
     printf("TEAM %d DETETOU Q A CORRIDA COMECOU!\n",team_id);
+    while(1){
+        pthread_mutex_lock(&teams[team_id].mutex_car_changed_state);
+        while(){ //TODO:
+            pthread_cond_wait(&teams[team_id].car_changed_state_cond,&teams[team_id].mutex_car_changed_state);
+        }
+        pthread_mutex_unlock(&teams[team_id].mutex_car_changed_state);
 
-   /* pthread_exit(NULL); */
+    }
+
+    /*pthread_exit(NULL); */
     for(int j=0;j<i;j++) pthread_join(cars[team_id*config.max_car_qnt_per_team+j].thread,NULL); //wait for threads to end
-
 }
 
 int get_stop_race(){
@@ -656,11 +695,18 @@ void *car_thread(void *void_index){
                 }
                 else if(low_fuel && fuel<((2*config.track_len)/cars[car_index].speed)*cars[car_index].consumption){ // tempo necessário para realizar 4 voltas->{ ((4*config.track_len)/cars[car_index].speed) }  * cars[car_index].consumption
                     //se não tiver COMBUSTIVEL NECESSÁRIO PARA REALIZAR +4 VOLTAS entra em modo SEGURANÇA
-                    notif.car_state==SEGURANCA;
+                    notif.car_state=SEGURANCA;
+                    pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
+                    teams[team_index].cars_in_safety_mode++;
+                    if(teams[team_index].cars_in_safety_mode==1){ //signal BOX only if its the first car in SEGURANCA mode
+                        pthread_cond_signal(&teams[team_index].car_changed_state_cond) //one process only
+                    }
+                    pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
+
                     //NOTIFICAR race manager process através de unnamed pipe
-                    pthread_mutex_lock(&shared_memory->mutex_write_to_unnamed_pipe);
-                    write(fd_unnamed_pipe[1],&notif,sizeof(notif)); //notifica alteração de estado do carro
-                    pthread_mutex_unlock(&shared_memory->mutex_write_to_unnamed_pipe);
+                    pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                    write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
+                    pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
                 }
 
             }
@@ -679,24 +725,51 @@ void *car_thread(void *void_index){
                     #endif
 
                     //NOTIFICAR race manager process através de unnamed pipe
-                    pthread_mutex_lock(&shared_memory->mutex_write_to_unnamed_pipe);
-                    write(fd_unnamed_pipe[1],&notif,sizeof(notif)); //notifica alteração de estado do carro
-                    pthread_mutex_unlock(&shared_memory->mutex_write_to_unnamed_pipe);
+                    pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                    write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
+                    pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
 
-                    break; //TERMINOU CORRIDA
+                    break; //TERMINOU CORRIDA!
                 }
-                else if(low_fuel || notif.car_state==SEGURANCA){ //TENTA ENTRAR NA BOX
-                    //TODO:
+                else if(low_fuel){
+                    //ENTRA NA BOX SE ESTIVER LIVRE
+                    pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
+                    if(teams[team_index].box_state==LIVRE){
+                        teams[team_index].car_in_box++;
+                        pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES OCUPADA
+                        pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state); //unlock so that Team manager can change state of BOX and other cars can read 
+                        
+                        notif.car_state=BOX; //CARRO NA BOX
+                        //notify race manager through unnamed pipe
+
+                        fuel=config.fuel_capacity; //atesta o carro
+                        sleep(2*config.time_unit);
+
+                        pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
+                        teams[team_index].car_in_box--; //LEAVE BOX
+                        pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES LIVRE AGAIN
+                        pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
+                    }else{
+                        pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
+                    }
+                    
+                }
+                else if(notif.car_state==SEGURANCA){
+                    //ENTRA NA BOX SE ESTIVER LIVRE OU RESERVADA
+
+                    //repara o carro..(volta a estado CORRIDA)->decrementar teams[team_index].cars_in_safety_mode--; e caso seja=0 notificar box
+                    fuel=config.fuel_capacity; //atesta o carro
+                    sleep(2*config.time_unit);
 
                 }
             }
 
             if(fuel<=0){
-                notif.car_state==DESISTENCIA;
+                notif.car_state=DESISTENCIA;
                 //NOTIFICAR race manager process através de unnamed pipe
-                pthread_mutex_lock(&shared_memory->mutex_write_to_unnamed_pipe);
-                write(fd_unnamed_pipe[1],&notif,sizeof(notif)); //notifica alteração de estado do carro
-                pthread_mutex_unlock(&shared_memory->mutex_write_to_unnamed_pipe);
+                pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
+                pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
 
                 break; //TERMINOU CORRIDA 
             }
@@ -790,7 +863,6 @@ void init_shared_memory(void){
     pthread_condattr_init(&attrcondv); //Initialize attribute of condition variable
     pthread_condattr_setpshared(&attrcondv, PTHREAD_PROCESS_SHARED);
     //note: these ^ attrs can be used to init multiple mutexes and cond vars
-    pthread_mutex_init(&shared_memory->mutex_write_to_unnamed_pipe, &attrmutex); //init mutex
     pthread_mutex_init(&shared_memory->mutex_race_state, &attrmutex); //init mutex
     pthread_cond_init(&shared_memory->race_state_cond, &attrcondv); //init cond var
 
@@ -814,6 +886,7 @@ void print_stats(){
 }
 
 void clean_resources(){
+    int i;
     signal(SIGINT, SIG_IGN); //ignore sigint signals
 
     pthread_mutex_destroy(&shared_memory->mutex_race_state);
@@ -865,8 +938,11 @@ void clean_resources(){
     //unlink named pipe
     unlink(PIPE_NAME);
     //close unnamed pipes file descriptors
-    close(fd_unnamed_pipe[0]); //fd for reading
-    close(fd_unnamed_pipe[1]); //fd for writing
+    for(i=0;i<config.teams_qnt;i++){
+        close(fd_unnamed_pipe[i][0]); //fd for reading
+        close(fd_unnamed_pipe[i][1]); //fd for writing
+    }
+    
 
     //close log file
     fclose(log_fp);

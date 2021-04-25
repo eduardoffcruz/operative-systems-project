@@ -58,9 +58,6 @@ typedef struct mem_struct{
     enum race_state_type race_state; 
 
     //
-    pthread_mutex_t mutex_write_to_unnamed_pipe;
-
-    //
     int stop_race_readers_in;
     int stop_race_readers_out;
     int wait_to_read;
@@ -86,21 +83,28 @@ typedef struct car{
     int reliability;
 
     int team_index;
-    enum car_state_type car_state;
+    //enum car_state_type car_state;
 }car;
 
 //Teams 
 typedef struct team{
     char team_name[128];
     int curr_car_qnt;
+
+    pthread_mutex_t mutex_write_to_unnamed_pipe; //mutex para synchronizar escrita por vários carros de uma equipa no unnamed pipe dessa equipa
+    /**********BOX**************/
     enum box_state_type box_state;
+    int cars_in_safety_mode;
+    int car_in_box;
+    pthread_mutex_t mutex_car_changed_state;
+    pthread_cond_t car_changed_state_cond;
 }team;
 
 //CAR STATE CHANGED NOTIFICATION
 typedef struct notification{
     int car_index;
     enum car_state_type car_state;
-}notification
+}notification;
 
 //STATS
 typedef struct stats{
@@ -112,7 +116,8 @@ typedef struct stats{
 //GLOBAL VARIABLES
 Config config;
 FILE *log_fp;
-int fd_named_pipe, fd_unnamed_pipe[2];
+int fd_named_pipe;
+int (*fd_unnamed_pipe)[2]; //array of unnamed pipe file descriptors
 int shmid; //shared memory id
 /*SHARED MEMORY*/
 mem_struct *shared_memory; 
