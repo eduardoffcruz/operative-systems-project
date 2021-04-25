@@ -30,7 +30,7 @@ int main(void){
     sem_unlink("SEM_WRITE_RACE_STATE");
     sem_write_race_state=sem_open("SEM_WRITE_RACE_STATE",O_CREAT|O_EXCL,0700,1); 
     sem_unlink("SEM_MUTEX_RACE_STATE");
-    sem_mutex_race_state=sem_open("SEM_MUTEX_RACE_STATE",O_CREAT|O_EXCL,0700,1); 
+    sem_mutex_race_state=sem_open("SEM_MUTEX_RACE_STATE",O_CREAT|O_EXCL,0700,1); */
 
     //escrita e leitura de carros da memoria partilhada (escrita por 1 race manager, lida por vários team manager's)
     sem_unlink("SEM_READERS_IN");
@@ -38,7 +38,7 @@ int main(void){
     sem_unlink("SEM_READERS_OUT");
     sem_readers_out=sem_open("SEM_READERS_OUT",O_CREAT|O_EXCL,0700,1); 
     sem_unlink("SEM_WRITECAR");
-    sem_writecar=sem_open("SEM_WRITECAR",O_CREAT|O_EXCL,0700,0);  */
+    sem_writecar=sem_open("SEM_WRITECAR",O_CREAT|O_EXCL,0700,0);  
 
     sem_unlink("SEM_STOP_RACE_READERS_IN");
     sem_stop_race_readers_in=sem_open("SEM_STOP_RACE_READERS_IN",O_CREAT|O_EXCL,0700,1)
@@ -143,19 +143,36 @@ void handle_addcar_command(char *command){
     }
 
     
-    pthread_mutex_lock(&shared_memory->mutex_race_state);
+    //implementaçao do caso clássico de write/readers sem starvation:
+    //a ideia consiste em o writer indicar aos readers a sua necessidade de escrever. A partir daí nenhum reader pode entrar na zona critica.
+    //ao sairem da zona critica cada reader verifica se o writer está waiting e o ultimo reader a sair liberta o writer para q ele possa entrar na zona e escrever
+    //depois de escrever, o write liberta os readers q estão waiting para q eles possam novamente efetuar leitura
+    sem_wait(sem_readers_in); //mutual exclusion for readers_in 
+    sem_wait(sem_readers_out); //and readers_out shm vars
+    if(shared_memory->readers_in==shared_memory->readers_out){ //se não houverem leitores na zona crítica 
+        shared_memory->readers_in=0;//reset
+        shared_memory->readers_out=0;//reset
+        sem_post(sem_readers_out);
+    }
+    else{ //caso existam leitores na zona crítica
+        shared_memory->wait=1;//a flag wait é colocada a 1, não entram mais leitores na zona crítica e no momento em q todos os leitores q ainda estivessem na zona crítica, saírem, é feito sem_post(sem_write), para que se possa escrever
+        sem_post(sem_readers_out);
+        sem_wait(sem_writecar);
+        shared_memory->wait=0; //reset        
+    }
     //WRITE (CRITICAL SECTION)
     team_index=add_car_to_teams_shm(team_name,car_number,speed,consumption,reliability); //add car to shared memory 
 
+    sem_post(sem_readers_in); //podem entrar leitores
+
     if(team_index!=-1){
+        pthread_mutex_lock(&shared_memory->mutex_race_state);
         shared_memory->new_car_team=team_index;
         pthread_cond_broadcast(&shared_memory->race_state_cond);
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
         sprintf(aux,"NEW CAR LOADED => %s",command);
         write_log(aux);
-        return;
     }
-    pthread_mutex_unlock(&shared_memory->mutex_race_state);
 
 }
 
@@ -346,20 +363,25 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
 
 void start_race(){
     //synchronized exacly like when reading car infos from shared-memory in team_manager process to create car threads etc
-
-    pthread_mutex_lock(&shared_memory->mutex_race_state);
+    sem_wait(sem_readers_in); 
+    shared_memory->readers_in++;
+    sem_post(sem_readers_in);
+    
     //READ shared_memory->curr_teams_qnt
-    if(shared_memory->curr_teams_qnt!=config.teams_qnt){  
+    if(shared_memory->curr_teams_qnt!=config.teams_qnt){  //CRITICAL SECTION (READ)
         write_log("CANNOT START, NOT ENOUGH TEAMS");
     }
-    else if(shared_memory->race_state==OFF){
+    else{
         //start race
-        shared_memory->race_state=ON; 
-        pthread_cond_broadcast(&shared_memory->race_state_cond); //notify all waiting threads/processes
+        set_race_state(ON);
     }
-    //se a corrida já estiver ON.. simplesmente ignora
-    
-    pthread_mutex_unlock(&shared_memory->mutex_race_state);
+
+    sem_wait(sem_readers_out);
+    shared_memory->readers_out++;
+    if(shared_memory->wait==1 && shared_memory->readers_in==shared_memory->readers_out){
+        sem_post(sem_writecar);
+    } 
+    sem_post(sem_readers_out);
 }
 
 void race_manager(void){
@@ -521,6 +543,13 @@ void handle_sigint_sigtstp(int signum){ //no processo main
 }
 
 
+void set_race_state(enum race_state_type state){
+    pthread_mutex_lock(&shared_memory->mutex_race_state); //exclusão mutua
+    shared_memory->race_state=state; //write (zona critica)
+    pthread_cond_broadcast(&shared_memory->race_state_cond); //notify all waiting threads/processes
+    pthread_mutex_unlock(&shared_memory->mutex_race_state);
+}
+
 enum race_state_type get_race_state(){
     int state;
     pthread_mutex_lock(&shared_memory->mutex_race_state);
@@ -546,29 +575,49 @@ void team_manager(int team_id){
         pthread_mutex_lock(&shared_memory->mutex_race_state);
         while(shared_memory->new_car_team!=team_id && shared_memory->race_state==OFF){
             pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
-        }
-        shared_memory->new_car_team=-1;//reset
+        }shared_memory->new_car_team=-1;//reset
         if(shared_memory->race_state==ON){
             pthread_mutex_unlock(&shared_memory->mutex_race_state);
             break; //stop loading cars
         }
-        
-        //LER NOVO CARRO e criar thread
-        while(i<teams[team_id].curr_car_qnt){
-            cars_index[i]=team_id*config.max_car_qnt_per_team+i; //index in shm memory's array of cars
-            printf("car name: %s\n",cars[team_id*config.max_car_qnt_per_team+i].car_number);
-		    if(pthread_create(&cars[team_id*config.max_car_qnt_per_team+i].thread,NULL,car_thread,&cars_index[i])==-1){
-                //erro
-                write_log("[ERROR] unable to create car thread");
-                shutdown_all();
-            }
-            i++;
-
-            #ifdef DEBUG
-            printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM %s !\n",teams[team_id].team_name);
-            #endif
-        }
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
+        
+        
+        //read cars from shared memory
+        sem_wait(sem_readers_in); 
+        shared_memory->readers_in++;
+        sem_post(sem_readers_in);
+
+        //verificar se já existe registo da team i através do curr_team_qnt 
+        //se sim, LER CARROs e criar threads
+        //EXEMPLO: esta equipa tem o nr 0. Se a current qnt de equipas for 0, é pq esta equipa ainda n foi criada através do named pipe
+        //logo não se faz nada. Se a curr qnt de equipas fosse 2, é pq já existe a equipa com o nr 0 na shared memory, logo é necessário verificar se esta já tem carros e se tiver, criar as respetivas threads!
+        //por outro lado se o nr de carros q a equipa tem na shared memory for superior a i, então é porque faltam criar threads para os carros
+        if(shared_memory->curr_teams_qnt>=team_id+1){
+            if(teams[team_id].curr_car_qnt>=i+1){
+                while(i<teams[team_id].curr_car_qnt){
+                    cars_index[i]=team_id*config.max_car_qnt_per_team+i; //index in shm memory's array of cars
+                    printf("car name: %s\n",cars[team_id*config.max_car_qnt_per_team+i].car_number);
+		            if(pthread_create(&cars[team_id*config.max_car_qnt_per_team+i].thread,NULL,car_thread,&cars_index[i])==-1){
+                        //erro
+                        write_log("[ERROR] unable to create car thread");
+                        shutdown_all();
+                    }
+                    i++;
+
+                    #ifdef DEBUG
+                    printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM %s !\n",teams[team_id].team_name);
+                    #endif
+                }
+            }
+        }
+
+        sem_wait(sem_readers_out);
+        shared_memory->readers_out++;
+        if(shared_memory->wait==1 && shared_memory->readers_in==shared_memory->readers_out){
+            sem_post(sem_writecar);
+        } 
+        sem_post(sem_readers_out);
 
     }//antes da corrida começar
 
@@ -837,13 +886,13 @@ void clean_resources(){
     sem_close(sem_write_race_state);
     sem_unlink("SEM_WRITE_RACE_STATE");
     sem_close(sem_mutex_race_state);
-    sem_unlink("SEM_MUTEX_RACE_STATE");
+    sem_unlink("SEM_MUTEX_RACE_STATE");*/
     sem_close(sem_readers_in);
     sem_unlink("SEM_READERS_IN");
     sem_close(sem_readers_out);
     sem_unlink("SEM_READERS_OUT");
     sem_close(sem_writecar);
-    sem_unlink("SEM_WRITECAR");*/
+    sem_unlink("SEM_WRITECAR");
 
     sem_close(sem_stop_race_readers_in);
     sem_unlink("SEM_STOP_RACE_READERS_IN");

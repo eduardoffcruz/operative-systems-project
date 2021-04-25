@@ -47,12 +47,11 @@ typedef struct mem_struct{
 
     //...
     //para synchronizacao na escrita e criação de equipas+carros 
-/*
     int readers_in;
     int readers_out;
     int wait;
     int new_car_team; //indicação da equipa onde foi adicionado o novo carro
-*/
+
     pthread_mutex_t mutex_race_state;
     pthread_cond_t race_state_cond;
     enum race_state_type race_state; 
