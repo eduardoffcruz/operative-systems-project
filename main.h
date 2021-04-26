@@ -27,12 +27,12 @@
 #define BUFF_SIZE 512
 
 typedef struct Config{
-    int time_unit; //numero de unidades de tempo por segundo
+    float time_unit; //numero de unidades de tempo por segundo
     int track_len,laps_qnt; //em metros //numero de voltas da corrida
     int teams_qnt; //numero de equipas (minimo de 3 equipas)
     int max_car_qnt_per_team; 
-    int avaria_time_interval; //nr de unidades de tempo entre novo calculo de avaria 
-    int reparacao_min_time, reparacao_max_time; //tempo minimo e maximo de reparacao (em unidades de tempo)
+    float avaria_time_interval; //nr de unidades de tempo entre novo calculo de avaria 
+    float reparacao_min_time, reparacao_max_time; //tempo minimo e maximo de reparacao (em unidades de tempo)
     int fuel_capacity; //capacidade do deposito de combustivel (em litros) de cada carro
 }Config;
 
@@ -51,8 +51,9 @@ typedef struct mem_struct{
     int readers_in;
     int readers_out;
     int wait;
+    */
     int new_car_team; //indicação da equipa onde foi adicionado o novo carro
-*/
+
     pthread_mutex_t mutex_race_state;
     pthread_cond_t race_state_cond;
     enum race_state_type race_state; 
@@ -174,4 +175,5 @@ int validate_addcar_command(char *command, char *team_name, char* car_num, int *
 void handle_command(char *command);
 void set_stop_race(int i);
 int get_stop_race();
+char* box_state_to_str(int state);
 char *car_state_to_str(int car_state);

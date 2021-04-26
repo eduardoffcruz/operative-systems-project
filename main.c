@@ -42,11 +42,11 @@ int main(void){
     */
 
     sem_unlink("SEM_STOP_RACE_READERS_IN");
-    sem_stop_race_readers_in=sem_open("SEM_STOP_RACE_READERS_IN",O_CREAT|O_EXCL,0700,1)
+    sem_stop_race_readers_in=sem_open("SEM_STOP_RACE_READERS_IN",O_CREAT|O_EXCL,0700,1);
     sem_unlink("SEM_STOP_RACE_READERS_OUT");
-    sem_stop_race_readers_out=sem_open("SEM_STOP_RACE_READERS_OUT",O_CREAT|O_EXCL,0700,1)
+    sem_stop_race_readers_out=sem_open("SEM_STOP_RACE_READERS_OUT",O_CREAT|O_EXCL,0700,1);
     sem_unlink("SEM_WRITE_STOP_RACE");
-    sem_write_stop_race=sem_open("SEM_WRITE_STOP_RACE",O_CREAT|O_EXCL,0700,0)
+    sem_write_stop_race=sem_open("SEM_WRITE_STOP_RACE",O_CREAT|O_EXCL,0700,0);
     
 
     sem_unlink("SEM_STATS");
@@ -70,7 +70,11 @@ int main(void){
     #endif
 
     //allocate space for UNNAMED PIPEs file descriptors
-    if(fd_unnamed_pipe=(int(*)[2])malloc(config.teams_qnt*sizeof(*fd_unnamed_pipe));
+    //TODO: DAR FREE DESTA MEMORIA NO FINAL!
+    if((fd_unnamed_pipe=(int(*)[2])malloc(config.teams_qnt*sizeof(*fd_unnamed_pipe)))==NULL){
+        write_log("[ERROR] allocationg memory for unnamed pipe's file descriptors");
+        shutdown_all();
+    }
 
     //NAMED PIPE
     if ((mkfifo(PIPE_NAME, O_CREAT|O_EXCL|0600)<0)&&(errno!=EEXIST)){ //creates the named pipe if it doesn't exist yet
@@ -309,7 +313,7 @@ void add_car_to_team(int i,int j,char* car_number, int speed, float consumption,
     int car_index=i*config.max_car_qnt_per_team+j;
     memcpy(cars[car_index].car_number,car_number,len*sizeof(char));
     cars[car_index].car_number[len]='\0';
-    cars[car_index].car_state=BOX; //TODO:
+    //cars[car_index].car_state=CORRIDA; //delete line
     cars[car_index].speed=speed;
     cars[car_index].consumption=consumption;
     cars[car_index].reliability=reliability;
@@ -339,20 +343,20 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
         add_car_to_team(i,0,car_number,speed,consumption,reliability);
 
         #ifdef DEBUG
-        printf("[DEBUG] CAR ADDED TO NEW TEAM %s with consumption: %.2f ; speed : %d ; reliability : %d \n",teams[i].team_name,cars[i*config.max_car_qnt_per_team+0].consumption,cars[i*config.max_car_qnt_per_team+0].speed,cars[i*config.max_car_qnt_per_team+0].reliability);
+        printf("[DEBUG] CAR ADDED TO NEW TEAM [%s] with consumption: %.2f ; speed : %d ; reliability : %d \n",teams[i].team_name,cars[i*config.max_car_qnt_per_team+0].consumption,cars[i*config.max_car_qnt_per_team+0].speed,cars[i*config.max_car_qnt_per_team+0].reliability);
         #endif
     }
     else{
         //já existe team com este nome no index i
         j=teams[i].curr_car_qnt;
         if(j==config.max_car_qnt_per_team){
-            sprintf(aux,"UNABLE TO ADD CAR, CAR LIMIT EXCEEDED FOR TEAM %s",team_name);
+            sprintf(aux,"UNABLE TO ADD CAR, CAR LIMIT EXCEEDED FOR TEAM [%s]",team_name);
             write_log(aux);
             return -1; //FAILED
         }
         for(k=0;k<j;k++){
             if(strcmp(cars[i*config.max_car_qnt_per_team+k].car_number,car_number)==0){
-                sprintf(aux,"UNABLE TO ADD CAR, CAR ALREADY EXISTS IN TEAM %s",team_name);
+                sprintf(aux,"UNABLE TO ADD CAR, CAR ALREADY EXISTS IN TEAM [%s]",team_name);
                 write_log(aux);
                 return -1; //FAILED
             }
@@ -361,7 +365,7 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
         add_car_to_team(i,j,car_number,speed,consumption,reliability);
 
         #ifdef DEBUG
-        printf("[DEBUG] CAR ADDED TO ALREADY EXISTING TEAM %s with consumption: %.2f ; speed : %d ; reliability : %d \n",teams[i].team_name,cars[i*config.max_car_qnt_per_team+j].consumption,cars[i*config.max_car_qnt_per_team+j].speed,cars[i*config.max_car_qnt_per_team+j].reliability);
+        printf("[DEBUG] CAR ADDED TO ALREADY EXISTING TEAM [%s] with consumption: %.2f ; speed : %d ; reliability : %d \n",teams[i].team_name,cars[i*config.max_car_qnt_per_team+j].consumption,cars[i*config.max_car_qnt_per_team+j].speed,cars[i*config.max_car_qnt_per_team+j].reliability);
         #endif
     }
     return i; //SUCESS
@@ -400,11 +404,11 @@ void race_manager(void){
 
     //create TEAM MANAGER PROCESSes (1 per team)
     for(i=0;i<config.teams_qnt;i++){
+        //create/open UNNAMED PIPE
+        pipe(fd_unnamed_pipe[i]);
         if((teams_pid[i]=fork())==0){
-            //create/open UNNAMED PIPE
-            pipe(fd_unnamed_pipe[i]);
             #ifdef DEBUG
-            printf("[DEBUG] Race Manager [pid:%d] created Team %d process [pid:%d]!\n",getppid(),i,getpid());
+            printf("[DEBUG] Race Manager [pid:%d] created Team %d process [pid:%d] with unnamed pipe:%d %d!\n",getppid(),i,getpid(),fd_unnamed_pipe[i][0],fd_unnamed_pipe[i][1]);
             #endif
             //TEAM i MANAGER PROCESS
             team_manager(i); //each team has a identifier number from 0 to config.teams_qnt-1
@@ -426,23 +430,24 @@ void race_manager(void){
     #endif
     //could have used 2 threads for reading named pipe and/or unnamed pipe input
     while(1){
-
         //I/O Multiplexing
         FD_ZERO(&read_set);
         for(i=0;i<config.teams_qnt;i++){
-            FD_SET(fd_unnamed_pipe[i][0],&read_set);
+            FD_SET(fd_unnamed_pipe[i][0],&read_set); //SET ALL UNNAMED PIPES FOR EACH TEAM (1 UNNAMED PIPE PER TEAM)
         }
         FD_SET(fd_named_pipe,&read_set);
         if(select(fd_named_pipe+1,&read_set,NULL,NULL,NULL)>0){
             if(FD_ISSET(fd_named_pipe,&read_set)){
+                printf("\nfoi desbloqueado named pipe\n");
                 n=read(fd_named_pipe,buff,sizeof(buff));
                 buff[n-1] = '\0'; //put a \0 in the end of string
+                printf("BUFF:%s\n",buff);
                 handle_command(buff);
             }
             for(i=0;i<config.teams_qnt;i++){
                 if(FD_ISSET(fd_unnamed_pipe[i][0],&read_set)){
                     read(fd_unnamed_pipe[i][0], &notif, sizeof(struct notification));
-                    sprintf(buff,"CAR NUMBER [%s] FROM TEAM %s CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[cars[notif.car_index].team_index].team_name,car_state_to_str(notif.car_state));
+                    sprintf(buff,"CAR NUMBER [%s] FROM TEAM [%s] CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[i].team_name,car_state_to_str(notif.car_state));
                     write_log(buff);
                 }
             }
@@ -566,13 +571,17 @@ void team_manager(int team_id){
     int *cars_index;
     int i=0; //team's current car count (in process)
 
+    //save last values
+    int last_car_in_box=0; //false
+    int last_cars_in_safety_mode=0; 
+
 	cars_index = (int*)malloc(sizeof(int)*(config.max_car_qnt_per_team)); //heap
 
     close(fd_unnamed_pipe[team_id][0]); //close unnamed pipe reading file descriptor
 
-    teams[team_id].mutex_car_changed_state=PTHREAD_MUTEX_INITIALIZER; //INIT MUTEX
-    teams[team_id].car_changed_state_cond=PTHREAD_COND_INITIALIZER; //INIT COND VAR
-    teams[team_id].mutex_write_to_unnamed_pipe=PTHREAD_MUTEX_INITIALIZER; //INIT MUTEX
+    pthread_mutex_init(&teams[team_id].mutex_car_changed_state,NULL); //INIT MUTEX (default)
+    pthread_cond_init(&teams[team_id].car_changed_state_cond,NULL);//INIT COND VAR default
+    pthread_mutex_init(&teams[team_id].mutex_write_to_unnamed_pipe,NULL); //INIT MUTEX default
 
     while(1){
         printf("--------wasting.cpu.?\n");
@@ -598,20 +607,39 @@ void team_manager(int team_id){
             i++;
 
             #ifdef DEBUG
-            printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM %s !\n",teams[team_id].team_name);
+            printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM [%s] !\n",teams[team_id].team_name);
             #endif
         }
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
 
     }//antes da corrida começar
     printf("TEAM %d DETETOU Q A CORRIDA COMECOU!\n",team_id);
+    //CORRIDA COMEÇOU....GERIR BOX!
     while(1){
+        //TODO: DESBLOQUEAR ISTO E SAIR QND O RACE_STATE == TERMINADA
         pthread_mutex_lock(&teams[team_id].mutex_car_changed_state);
-        while(){ //TODO:
+        while(teams[team_id].car_in_box==last_car_in_box && teams[team_id].cars_in_safety_mode==last_cars_in_safety_mode){ //UNLOCK ON CHANGE
             pthread_cond_wait(&teams[team_id].car_changed_state_cond,&teams[team_id].mutex_car_changed_state);
         }
-        pthread_mutex_unlock(&teams[team_id].mutex_car_changed_state);
+        //UPDATE AND MANAGE BOX STATE
+        if(teams[team_id].car_in_box){ //se estiver um carro na box
+            teams[team_id].box_state=OCUPADA;
+        }
+        else{
+            if(teams[team_id].cars_in_safety_mode>0){
+                teams[team_id].box_state=RESERVADA;
+            }
+            else{
+                teams[team_id].box_state=LIVRE;
+            }
+        }
+        if(teams[team_id].car_in_box!=last_car_in_box){last_car_in_box=teams[team_id].car_in_box;}
+        if(teams[team_id].cars_in_safety_mode!=last_cars_in_safety_mode){teams[team_id].cars_in_safety_mode=last_cars_in_safety_mode;}
 
+        #ifdef DEBUG
+        printf("[DEBUG] BOX TEAM [%s] CHANGED STATE=> %s\n",teams[team_id].team_name,box_state_to_str(teams[team_id].box_state));    
+        #endif
+        pthread_mutex_unlock(&teams[team_id].mutex_car_changed_state);
     }
 
     /*pthread_exit(NULL); */
@@ -668,6 +696,8 @@ void *car_thread(void *void_index){
 
     int low_fuel=0; //flag
 
+    unsigned int seed = getpid()*time(NULL)+car_index; //thread seed
+
     notif.car_index=car_index;
     notif.car_state=CORRIDA; //initially ready to race
 
@@ -680,12 +710,12 @@ void *car_thread(void *void_index){
     while(1){
         pthread_mutex_lock(&shared_memory->mutex_race_state);
         while(shared_memory->race_state==OFF && notif.car_state!=CORRIDA){
-            pthread_cond_wait(&shared_memory->race_state_cond);
+            pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
         }
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
         //RACING
         while(1){
-            sleep(config.time_unit); //time unit
+            usleep((unsigned int)(1000000/config.time_unit)); //as contas dos metros percorridos e da gasolina gasta são feitas de (1/config.time_unit) em (1/config.time_unit) segundos
             if(notif.car_state==CORRIDA){
                 fuel-=cars[car_index].consumption; //consumption per time unit
                 total_meters+=cars[car_index].speed; //meters per time unit
@@ -696,10 +726,11 @@ void *car_thread(void *void_index){
                 else if(low_fuel && fuel<((2*config.track_len)/cars[car_index].speed)*cars[car_index].consumption){ // tempo necessário para realizar 4 voltas->{ ((4*config.track_len)/cars[car_index].speed) }  * cars[car_index].consumption
                     //se não tiver COMBUSTIVEL NECESSÁRIO PARA REALIZAR +4 VOLTAS entra em modo SEGURANÇA
                     notif.car_state=SEGURANCA;
+                    low_fuel=0; //reset
                     pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
                     teams[team_index].cars_in_safety_mode++;
                     if(teams[team_index].cars_in_safety_mode==1){ //signal BOX only if its the first car in SEGURANCA mode
-                        pthread_cond_signal(&teams[team_index].car_changed_state_cond) //one process only
+                        pthread_cond_signal(&teams[team_index].car_changed_state_cond); //one process only
                     }
                     pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
 
@@ -719,6 +750,16 @@ void *car_thread(void *void_index){
             if(total_meters/config.track_len>laps){ //PASSOU NOVAMENTE PELA META
                 laps++; //adiciona volta
                 if(laps==config.laps_qnt || get_stop_race()){ //se chegou ao fim da corrida ou se tiver havido um 'pedido' para terminar a corrida
+                    if(notif.car_state==SEGURANCA){
+                        //SE O CARRO ESTIVER EM SEGURANÇA QUANDO TERMINAR A CORRIDA, É NECESSÁRIO DECREMENTAR O NÚMERO DE CARROS EM SEGURANÇA EM MEMÓRIA PARTILHADA JÁ Q O ESTADO DA BOX DEPENDE DISSO
+                        pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
+                        teams[team_index].cars_in_safety_mode--;
+                        if(teams[team_index].cars_in_safety_mode==0){ 
+                            pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX WILL BECOME LIVRE INSTEAD OF RESERVADA
+                        }
+                        pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
+                    }
+
                     notif.car_state=TERMINADO;
                     #ifdef DEBUG
                     printf("[DEBUG] thread said: CAR NUMBER [%s] FROM TEAM [%s] FINISHED RACE!\n",cars[car_index].car_number,teams[team_index].team_name);
@@ -731,39 +772,78 @@ void *car_thread(void *void_index){
 
                     break; //TERMINOU CORRIDA!
                 }
-                else if(low_fuel){
-                    //ENTRA NA BOX SE ESTIVER LIVRE
+                else if(notif.car_state==SEGURANCA){ 
+                    //ENTRA NA BOX SE ESTIVER LIVRE OU RESERVADA
                     pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
-                    if(teams[team_index].box_state==LIVRE){
+                    if(teams[team_index].box_state!=OCUPADA){
                         teams[team_index].car_in_box++;
                         pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES OCUPADA
                         pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state); //unlock so that Team manager can change state of BOX and other cars can read 
                         
                         notif.car_state=BOX; //CARRO NA BOX
-                        //notify race manager through unnamed pipe
+                        //NOTIFICAR race manager process através de unnamed pipe
+                        pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                        write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
+                        pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                        
+                        //REPARA O CARRO (demora um intervalo de tempo aleatorio entre reparacao_min_time e reparacao_max_time)
+                        usleep((unsigned int)((config.reparacao_min_time*1000000+rand_r(&seed)%(unsigned int)(config.reparacao_max_time*1000000+1))*(1/config.time_unit))); //rand_r is reentrant..thread safe :) 
+                        //ATESTA O CARRO 
+                        fuel=config.fuel_capacity; 
+                        usleep((unsigned int)(2*(1000000/config.time_unit))); 
 
-                        fuel=config.fuel_capacity; //atesta o carro
-                        sleep(2*config.time_unit);
+                        pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
+                        teams[team_index].car_in_box--; //LEAVE BOX
+                        teams[team_index].cars_in_safety_mode--;
+                        pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES LIVRE AGAIN
+                        pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
+
+                        low_fuel=0; //reset
+                        notif.car_state=CORRIDA; //CARRO DEIXA DE ESTAR EM SEGURANÇA E VOLTA A ESTAR EM MODO CORRIDA
+                        //NOTIFICAR race manager process através de unnamed pipe
+                        pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                        write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro através de unnamed pipe
+                        pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                    }
+                    else{
+                       pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state); 
+                    }                    
+                }
+                else if(low_fuel){ 
+                    //ENTRA NA BOX SE ESTIVER LIVRE
+                    pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
+                    if(teams[team_index].box_state==LIVRE){ //|| (notif.car_state==SEGURANCA && teams[team_index].box_state==RESERVADA)
+                        teams[team_index].car_in_box++;
+                        pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES OCUPADA
+                        pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state); //unlock so that Team manager can change state of BOX and other cars can read 
+                        
+                        notif.car_state=BOX; //CARRO NA BOX
+                        //NOTIFICAR race manager process através de unnamed pipe
+                        pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                        write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
+                        pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                        
+                        //ATESTA O CARRO 
+                        fuel=config.fuel_capacity; 
+                        usleep((unsigned int)(2*(1000000/config.time_unit)));
 
                         pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
                         teams[team_index].car_in_box--; //LEAVE BOX
                         pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES LIVRE AGAIN
                         pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
+
+                        low_fuel=0; //reset
+                        notif.car_state=CORRIDA; //CARRO DE VOLTA EM MODO CORRIDA
+                        //NOTIFICAR race manager process através de unnamed pipe
+                        pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                        write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
+                        pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
                     }else{
                         pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
                     }
                     
                 }
-                else if(notif.car_state==SEGURANCA){
-                    //ENTRA NA BOX SE ESTIVER LIVRE OU RESERVADA
-
-                    //repara o carro..(volta a estado CORRIDA)->decrementar teams[team_index].cars_in_safety_mode--; e caso seja=0 notificar box
-                    fuel=config.fuel_capacity; //atesta o carro
-                    sleep(2*config.time_unit);
-
-                }
             }
-
             if(fuel<=0){
                 notif.car_state=DESISTENCIA;
                 //NOTIFICAR race manager process através de unnamed pipe
@@ -792,7 +872,7 @@ void *car_thread(void *void_index){
 
 void malfunction_manager(void){
     //TODO:processo responsavel por gerar aleatoriamente as avarias dos carros a partir da informacao da sua fiabilidade
-    srand(time(0)); //set seed
+    srand(getpid()*time(NULL)); //set seed
     int rand_num;
     int i,j;
     int malfunction_count=0;
@@ -804,7 +884,7 @@ void malfunction_manager(void){
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
 
         //sem_wait(sem_malfunction_generator); 
-        sleep(config.avaria_time_interval/config.time_unit); 
+        usleep((unsigned int)(config.avaria_time_interval*(1000000/config.time_unit)));
         //all this values can be acessed during RACE time because, 
         //no changes are made or allowed to be made, to this values, during race time. 
         for(i=0;i<shared_memory->curr_teams_qnt;i++){ 
@@ -814,7 +894,7 @@ void malfunction_manager(void){
                     //AVARIA NO CARRO rand_num>=cars[car_index]
                     malfunction_count++;
                     #ifdef DEBUG
-                    printf("[DEBUG] AVARIA NO CARRO number [%s] DA TEAM %s\n",cars[i*config.max_car_qnt_per_team+j].car_number,teams[i].team_name);
+                    printf("[DEBUG] AVARIA NO CARRO number [%s] DA TEAM [%s]\n",cars[i*config.max_car_qnt_per_team+j].car_number,teams[i].team_name);
                     #endif
                     //...comunicar avaria ao carro, pela message queue 
                 }
@@ -822,7 +902,7 @@ void malfunction_manager(void){
         }
 
         /***************************************/                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
-        if(malfunction_count>10){
+        if(malfunction_count>100){
             break;
         }
         /***************************************/
@@ -851,8 +931,11 @@ void init_shared_memory(void){
 
     shared_memory->race_state=OFF; 
     shared_memory->curr_teams_qnt=0; 
-    shared_memory->wait=0; shared_memory->readers_in=0; shared_memory->readers_out=0;
+    shared_memory->wait_to_read=0; shared_memory->stop_race_readers_in=0; shared_memory->stop_race_readers_out=0;
     shared_memory->new_car_team=-1;
+    shared_memory->stop_race=0;
+
+    //TODO: INIT STATS
     
     teams=(team*)(shared_memory+1);
     cars=(car*)(teams+config.teams_qnt);
@@ -882,6 +965,20 @@ void print_stats(){
 
     if(sem_post(sem_stats) == -1){
         //TODO: end program...    
+    }
+}
+
+char* box_state_to_str(int state){
+    switch (state)
+    {
+    case OCUPADA:
+        return "OCUPADA";
+    case LIVRE:
+        return "LIVRE";
+    case RESERVADA:
+        return "RESERVADA";
+    default:
+        return "";
     }
 }
 
@@ -1037,7 +1134,7 @@ void read_config(void){
         exit(-1);
     }
     aux[len]='\0';
-    if(sscanf(aux,"%d",&(config.time_unit))!=1){
+    if(sscanf(aux,"%f",&(config.time_unit))!=1){
         write_log("[ERROR] anomality in expected structure from CONFIG file ");
         fclose(fp);
         free(aux);
@@ -1099,7 +1196,7 @@ void read_config(void){
         exit(-1);
     }
     aux[len]='\0';
-    if(sscanf(aux,"%d",&(config.avaria_time_interval))!=1){
+    if(sscanf(aux,"%f",&(config.avaria_time_interval))!=1){
         write_log("[ERROR] anomality in expected structure from CONFIG file ");
         fclose(fp);
         free(aux);
@@ -1113,7 +1210,7 @@ void read_config(void){
         exit(-1);
     }
     aux[len]='\0';
-    if(sscanf(aux,"%d, %d",&(config.reparacao_min_time),&(config.reparacao_max_time))!=2){
+    if(sscanf(aux,"%f, %f",&(config.reparacao_min_time),&(config.reparacao_max_time))!=2){
         write_log("[ERROR] anomality in expected structure from CONFIG file ");
         fclose(fp);
         free(aux);
@@ -1137,7 +1234,7 @@ void read_config(void){
     #ifdef DEBUG
     printf("IMPORTED CONFIG:\n");
     printf("--------[DEBUG]-----------\n");
-    printf("time_units: %d\ntrack_length: %d , laps_num: %d\nteams_qnt: %d\nT_Avaria: %d\nT_Box_Min: %d, T_Box_Max: %d\nfuel_capacity: %d\n",config.time_unit,config.track_len,config.laps_qnt,config.teams_qnt,config.avaria_time_interval,config.reparacao_min_time,config.reparacao_max_time,config.fuel_capacity);
+    printf("time_units: %f\ntrack_length: %d , laps_num: %d\nteams_qnt: %d\nT_Avaria: %f\nT_Box_Min: %f, T_Box_Max: %f\nfuel_capacity: %d\n",config.time_unit,config.track_len,config.laps_qnt,config.teams_qnt,config.avaria_time_interval,config.reparacao_min_time,config.reparacao_max_time,config.fuel_capacity);
     printf("--------------------------\n");
     #endif
 
