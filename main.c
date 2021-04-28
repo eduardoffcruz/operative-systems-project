@@ -159,7 +159,7 @@ void handle_addcar_command(char *command){
         shared_memory->new_car_team=team_index;
         pthread_cond_broadcast(&shared_memory->race_state_cond);
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
-        sprintf(aux,"NEW CAR LOADED => %s",command);
+        sprintf(aux,"NEW CAR LOADED => %s",&command[7]);
         write_log(aux);
         return;
     }
@@ -313,7 +313,7 @@ void add_car_to_team(int i,int j,char* car_number, int speed, float consumption,
     int car_index=i*config.max_car_qnt_per_team+j;
     memcpy(cars[car_index].car_number,car_number,len*sizeof(char));
     cars[car_index].car_number[len]='\0';
-    //cars[car_index].car_state=CORRIDA; //delete line
+    cars[car_index].car_state=CORRIDA; 
     cars[car_index].speed=speed;
     cars[car_index].consumption=consumption;
     cars[car_index].reliability=reliability;
@@ -356,7 +356,7 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
         }
         for(k=0;k<j;k++){
             if(strcmp(cars[i*config.max_car_qnt_per_team+k].car_number,car_number)==0){
-                sprintf(aux,"UNABLE TO ADD CAR, CAR ALREADY EXISTS IN TEAM [%s]",team_name);
+                sprintf(aux,"UNABLE TO ADD CAR [%s], CAR ALREADY EXISTS IN TEAM [%s]",team_name);
                 write_log(aux);
                 return -1; //FAILED
             }
@@ -393,12 +393,13 @@ void race_manager(void){
     //TODO: 
     //recebe as informacoes de cada carro, através do named pipe, e escreve-as na memória partilhada. 
     //OS TEAM MANAGER PROCESSES VERIFICAM A SHM E CRIAM OS CARROS CONSOANTE A INFORMACAO Q LÁ FOI ESCRITA SOBRE OS CARROS
-    int i;
+    int i,j;
     int teams_pid[config.teams_qnt];
     fd_set read_set;
     int n;
     char buff[BUFF_SIZE];
-    struct notification notif;
+    struct notification notif; 
+    int finished_race_car_count=0;
 
     
 
@@ -438,21 +439,38 @@ void race_manager(void){
         FD_SET(fd_named_pipe,&read_set);
         if(select(fd_named_pipe+1,&read_set,NULL,NULL,NULL)>0){
             if(FD_ISSET(fd_named_pipe,&read_set)){
-                printf("\nfoi desbloqueado named pipe\n");
                 n=read(fd_named_pipe,buff,sizeof(buff));
                 buff[n-1] = '\0'; //put a \0 in the end of string
-                printf("BUFF:%s\n",buff);
+                //printf("BUFF:%s\n",buff);
                 handle_command(buff);
             }
             for(i=0;i<config.teams_qnt;i++){
                 if(FD_ISSET(fd_unnamed_pipe[i][0],&read_set)){
                     read(fd_unnamed_pipe[i][0], &notif, sizeof(struct notification));
-                    sprintf(buff,"CAR NUMBER [%s] FROM TEAM [%s] CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[i].team_name,car_state_to_str(notif.car_state));
+                    sprintf(buff,"CAR %s FROM TEAM [%s] CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[i].team_name,car_state_to_str(notif.car_state));
                     write_log(buff);
+                    //count cars in TERMINADO state
+                    if(notif.car_state==TERMINADO){
+                        finished_race_car_count++; //+1
+                        if(finished_race_car_count==1){
+                            sprintf(buff,"CAR %s WINS THE RACE",cars[notif.car_index].car_number);
+                            write_log(buff);
+                        }
+                        if(finished_race_car_count==get_total_car_count()){ //se todos os carros tiverem terminado a corrida..
+                            pthread_mutex_lock(&shared_memory->mutex_race_state);
+                            shared_memory->race_state=OFF; //todos os carros terminaram a corrida logo..estado da corrida == OFF
+                            pthread_mutex_unlock(&shared_memory->mutex_race_state);
+                            //SIGNAL ALL TEAM BOXES that race has finished (new race_state = OFF)
+                            for(j=0;j<config.teams_qnt;j++){
+                                pthread_mutex_lock(&teams[j].mutex_car_changed_state);
+                                pthread_cond_signal(&teams[j].car_changed_state_cond);
+                                pthread_mutex_unlock(&teams[j].mutex_car_changed_state);
+                            }
+                        }
+                    }
                 }
             }
         }
-
     }
 
 
@@ -461,6 +479,16 @@ void race_manager(void){
     printf("[DEBUG] all Team Manager processes ended\n");
     #endif
     //TODO:processo resposavel pela gestao da corrida(inicio, fim, classificacao final) e das equipas em jogo.
+}
+
+int get_total_car_count(){
+    //careful with synchronized acess!
+    //will be used for reading only, make sure that no process or thread can write these values when reading
+    int i,counter=0;
+    for(i=0;i<config.teams_qnt;i++){ //this function will be used only when all teams have been loaded! (after race started)
+        counter+=teams[i].curr_car_qnt;
+    }
+    return counter; //all cars
 }
 
 char *car_state_to_str(int car_state){
@@ -537,17 +565,13 @@ void handle_sigint_sigtstp(int signum){ //no processo main
         //os carros q se encontram na box neste momento devem terminar
         //após todos os carros concluirem a corrida imprimir as estatisticas, terminar,libertar e remover todos os recursos utilizados
         //TODO:
-
-        set_stop_race(1); //set true
-
-
-        write_log("RACE INTERRUPTED! WAIT FOR ALL CARS TO REACH FINISH LINE");
+        if(get_race_state()==ON){
+            set_stop_race(1); //set true
+            write_log("RACE INTERRUPTED! WAIT FOR ALL CARS TO REACH FINISH LINE");
+        }
         //TODO:
         shutdown_all();
     }else if(signum==SIGTSTP){
-        #ifdef DEBUG  
-        printf("[DEBUG] SIGTSTP CATCHED!\n");
-        #endif
         write_log("SIGNAL SIGTSTP RECEIVED");
         print_stats(); //imprime estatisticas
     }
@@ -569,7 +593,9 @@ void team_manager(int team_id){
     //TODO: manter atualizada na shared_memory, o estado da box! (LIVRE;OCUPADA;RESERVADA)
     //car threads sao criadas através da receção de comandos através do named pipe 
     int *cars_index;
-    int i=0; //team's current car count (in process)
+    int i=0,j; //team's current car count (in process)
+    int char aux[BUFF_SIZE];
+    race_state_type tmp;
 
     //save last values
     int last_car_in_box=0; //false
@@ -582,68 +608,82 @@ void team_manager(int team_id){
     pthread_mutex_init(&teams[team_id].mutex_car_changed_state,NULL); //INIT MUTEX (default)
     pthread_cond_init(&teams[team_id].car_changed_state_cond,NULL);//INIT COND VAR default
     pthread_mutex_init(&teams[team_id].mutex_write_to_unnamed_pipe,NULL); //INIT MUTEX default
-
     while(1){
-        printf("--------wasting.cpu.?\n");
-        pthread_mutex_lock(&shared_memory->mutex_race_state);
-        while(shared_memory->new_car_team!=team_id && shared_memory->race_state==OFF){
-            pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
-        }
-        shared_memory->new_car_team=-1;//reset
-        if(shared_memory->race_state==ON){
-            pthread_mutex_unlock(&shared_memory->mutex_race_state);
-            break; //stop loading cars
-        }
-        
-        //LER NOVO CARRO e criar thread
-        while(i<teams[team_id].curr_car_qnt){
-            cars_index[i]=team_id*config.max_car_qnt_per_team+i; //index in shm memory's array of cars
-            printf("car name: %s\n",cars[team_id*config.max_car_qnt_per_team+i].car_number);
-		    if(pthread_create(&cars[team_id*config.max_car_qnt_per_team+i].thread,NULL,car_thread,&cars_index[i])==-1){
-                //erro
-                write_log("[ERROR] unable to create car thread");
-                shutdown_all();
+        //CREATE CAR THREADS FROM SHM CARS INFO
+        //BEFORE RACE STARTS!
+        while(1){
+            //printf("not wasting cpu...!\n");
+            pthread_mutex_lock(&shared_memory->mutex_race_state);
+            while(shared_memory->new_car_team!=team_id && shared_memory->race_state==OFF){
+                //condicao para desbloquear: shared_memoru->new_car_team==team_id || shared_memory->race_state==ON
+                pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
             }
-            i++;
+            shared_memory->new_car_team=-1;//reset
+            if(shared_memory->race_state==ON){
+                for(j=0;j<i;j++){
+                    cars[team_id*config.max_car_qnt_per_team+j].car_state=CORRIDA; //SET all car states to allow car to start racing in car thread
+                }  
+                pthread_mutex_unlock(&shared_memory->mutex_race_state);
+                break; //stop loading cars
+            }
+            
+            //LER NOVO CARRO e criar thread
+            while(i<teams[team_id].curr_car_qnt){
+                cars_index[i]=team_id*config.max_car_qnt_per_team+i; //index in shm memory's array of cars
+                if(pthread_create(&cars[team_id*config.max_car_qnt_per_team+i].thread,NULL,car_thread,&cars_index[i])==-1){
+                    //erro
+                    write_log("[ERROR] unable to create car thread");
+                    shutdown_all();
+                }
+                i++;
 
-            #ifdef DEBUG
-            printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM [%s] !\n",teams[team_id].team_name);
-            #endif
-        }
-        pthread_mutex_unlock(&shared_memory->mutex_race_state);
+                #ifdef DEBUG
+                printf("[DEBUG] NOVA CAR THREAD CRIADA NA TEAM [%s] !\n",teams[team_id].team_name);
+                #endif
+            }
+            pthread_mutex_unlock(&shared_memory->mutex_race_state);
 
-    }//antes da corrida começar
-    printf("TEAM %d DETETOU Q A CORRIDA COMECOU!\n",team_id);
-    //CORRIDA COMEÇOU....GERIR BOX!
-    while(1){
-        //TODO: DESBLOQUEAR ISTO E SAIR QND O RACE_STATE == TERMINADA
-        pthread_mutex_lock(&teams[team_id].mutex_car_changed_state);
-        while(teams[team_id].car_in_box==last_car_in_box && teams[team_id].cars_in_safety_mode==last_cars_in_safety_mode){ //UNLOCK ON CHANGE
-            pthread_cond_wait(&teams[team_id].car_changed_state_cond,&teams[team_id].mutex_car_changed_state);
         }
-        //UPDATE AND MANAGE BOX STATE
-        if(teams[team_id].car_in_box){ //se estiver um carro na box
-            teams[team_id].box_state=OCUPADA;
-        }
-        else{
-            if(teams[team_id].cars_in_safety_mode>0){
-                teams[team_id].box_state=RESERVADA;
+        #ifdef DEBUG
+        printf("TEAM %d DETETOU Q A CORRIDA COMECOU!\n",team_id);
+        #endif
+        //CORRIDA COMEÇOU....GERIR BOX!
+        while(1){
+            //DESBLOQUEAR ISTO E SAIR QND O RACE_STATE == OFF
+            //TODO: VERIFICAR SE ESTÁ BEM SYNCH A PARTE DO race_state :/ 
+            pthread_mutex_lock(&teams[team_id].mutex_car_changed_state);                                                     
+            while(teams[team_id].car_in_box==last_car_in_box && teams[team_id].cars_in_safety_mode==last_cars_in_safety_mode && (tmp=get_race_state)==ON){ //UNLOCK ON CHANGE
+                //desbloqueia quando: teams[team_id].car_in_box!=last_car_in_box || teams[team_id].cars_in_safety_mode!=last_cars_in_safety_mode || race_state==OFF
+                pthread_cond_wait(&teams[team_id].car_changed_state_cond,&teams[team_id].mutex_car_changed_state);
+            }
+            if(tmp==OFF){
+                pthread_mutex_unlock(&teams[team_id].mutex_car_changed_state);
+                break; //exit while loop & restart
+            }
+            //UPDATE AND MANAGE BOX STATE
+            if(teams[team_id].car_in_box){ //se estiver um carro na box
+                teams[team_id].box_state=OCUPADA;
             }
             else{
-                teams[team_id].box_state=LIVRE;
+                if(teams[team_id].cars_in_safety_mode>0){
+                    teams[team_id].box_state=RESERVADA;
+                }
+                else{
+                    teams[team_id].box_state=LIVRE;
+                }
             }
+            if(teams[team_id].car_in_box!=last_car_in_box){last_car_in_box=teams[team_id].car_in_box;}
+            if(teams[team_id].cars_in_safety_mode!=last_cars_in_safety_mode){teams[team_id].cars_in_safety_mode=last_cars_in_safety_mode;}
+            pthread_mutex_unlock(&teams[team_id].mutex_car_changed_state);
+
+            sprintf(aux,"BOX TEAM [%s] CHANGED STATE! => %s",teams[team_id].team_name,box_state_to_str(teams[team_id].box_state));  
+            write_log(aux);
         }
-        if(teams[team_id].car_in_box!=last_car_in_box){last_car_in_box=teams[team_id].car_in_box;}
-        if(teams[team_id].cars_in_safety_mode!=last_cars_in_safety_mode){teams[team_id].cars_in_safety_mode=last_cars_in_safety_mode;}
 
-        #ifdef DEBUG
-        printf("[DEBUG] BOX TEAM [%s] CHANGED STATE=> %s\n",teams[team_id].team_name,box_state_to_str(teams[team_id].box_state));    
-        #endif
-        pthread_mutex_unlock(&teams[team_id].mutex_car_changed_state);
     }
-
-    /*pthread_exit(NULL); */
-    for(int j=0;j<i;j++) pthread_join(cars[team_id*config.max_car_qnt_per_team+j].thread,NULL); //wait for threads to end
+    
+    //not reachable..
+    for(int j=0;j<i;j++) pthread_join(cars[team_id*config.max_car_qnt_per_team+j].thread,NULL); //wait for threads to end..
 }
 
 int get_stop_race(){
@@ -690,43 +730,53 @@ void *car_thread(void *void_index){
     int car_index=*((int*)void_index);
     int team_index=cars[car_index].team_index; 
     struct notification notif; // used to send car state info to race manager process
-    int total_meters=0;
+    int total_meters;
     int laps=0; //voltas
-    float fuel=config.fuel_capacity; //starts with Deposit max capacity
+    float fuel; //starts with Deposit max capacity
 
-    int low_fuel=0; //flag
+    int low_fuel; //flag
 
     unsigned int seed = getpid()*time(NULL)+car_index; //thread seed
+    unsigned int repair_time; //rand between min and max from config^
 
     notif.car_index=car_index;
-    notif.car_state=CORRIDA; //initially ready to race
-
-    //int t_init; t_init=time(NULL);
 
     //quando a corrida começar as threads podem ler à vontade as infos do carro a q estão associados, na shared_memory 
     //sem q haja a necessidade de assegurar sincronização, visto q durante a corrida nenhuma informação relativa a carros 
     //é escrita em memória partilhada 
 
     while(1){
+        //ANTES DA CORRIDA
+        low_fuel=0;
+        fuel=config.fuel_capacity;
+        total_meters=0;
+        laps=0;
         pthread_mutex_lock(&shared_memory->mutex_race_state);
-        while(shared_memory->race_state==OFF && notif.car_state!=CORRIDA){
+        while(shared_memory->race_state==OFF || cars[car_index].car_state!=CORRIDA){
+            //desbloqueia quando: shared_memory->race_state==ON && notif.car_state==CORRIDA
             pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
         }
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
+        notif.car_state=CORRIDA;
+
         //RACING
         while(1){
             usleep((unsigned int)(1000000/config.time_unit)); //as contas dos metros percorridos e da gasolina gasta são feitas de (1/config.time_unit) em (1/config.time_unit) segundos
             if(notif.car_state==CORRIDA){
                 fuel-=cars[car_index].consumption; //consumption per time unit
                 total_meters+=cars[car_index].speed; //meters per time unit
+                #ifdef DEBUG
+                printf("[DEBUG] equipa [%s] carro [%s] metros percorridos: %d | gasolina: %f (em seguranca)\n",teams[team_index].team_name,cars[car_index].car_number,total_meters,fuel);
+                #endif
 
-                if(!low_fuel && fuel<((4*config.track_len)/cars[car_index].speed)*cars[car_index].consumption){
-                    low_fuel=1; //set true
-                }
-                else if(low_fuel && fuel<((2*config.track_len)/cars[car_index].speed)*cars[car_index].consumption){ // tempo necessário para realizar 4 voltas->{ ((4*config.track_len)/cars[car_index].speed) }  * cars[car_index].consumption
+                if(fuel<((2*config.track_len)/cars[car_index].speed)*cars[car_index].consumption){ // tempo necessário para realizar 4 voltas->{ ((4*config.track_len)/cars[car_index].speed) }  * cars[car_index].consumption
                     //se não tiver COMBUSTIVEL NECESSÁRIO PARA REALIZAR +4 VOLTAS entra em modo SEGURANÇA
-                    notif.car_state=SEGURANCA;
+                    notif.car_state=SEGURANCA; cars[car_index].car_state=SEGURANCA;
                     low_fuel=0; //reset
+                    //atualizar na shm
+                    #ifdef DEBUG
+                    printf("[DEBUG] equipa [%s] carro [%s] entrou em segurança por n ter combustivel para +2 voltas\n",teams[team_index].team_name,cars[car_index].car_number);
+                    #endif
                     pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
                     teams[team_index].cars_in_safety_mode++;
                     if(teams[team_index].cars_in_safety_mode==1){ //signal BOX only if its the first car in SEGURANCA mode
@@ -738,17 +788,32 @@ void *car_thread(void *void_index){
                     pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
                     write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
                     pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
+                    #ifdef DEBUG
+                    printf("[DEBUG] equipa [%s] carro [%s] notificou alteracao de estado (para segurança) do carro para unnamed pipe\n",teams[team_index].team_name,cars[car_index].car_number);
+                    #endif
                 }
-
+                else if(!low_fuel && fuel<((4*config.track_len)/cars[car_index].speed)*cars[car_index].consumption){
+                    low_fuel=1; //set true
+                    #ifdef DEBUG
+                    printf("[DEBUG] equipa [%s] carro [%s] deverá abastecer qnd conseguir entrar na box (sem combustivel para +4 voltas)\n",teams[team_index].team_name,cars[car_index].car_number);
+                    #endif
+                }
             }
             else if(notif.car_state==SEGURANCA){
                 //AVARIA ou POUCO COMBUSTIVEL
                 fuel-=0.4*cars[car_index].consumption; //40% consumption per time unit
                 total_meters+=0.3*cars[car_index].speed; //30% speed
+                #ifdef DEBUG
+                printf("[DEBUG] equipa [%s] carro [%s] metros percorridos: %d | gasolina: %f (em seguranca)\n",teams[team_index].team_name,cars[car_index].car_number,total_meters,fuel);
+                #endif
             }
+
 
             if(total_meters/config.track_len>laps){ //PASSOU NOVAMENTE PELA META
                 laps++; //adiciona volta
+                #ifdef DEBUG
+                printf("[DEBUG] equipa [%s] carro [%s] ACABOU DE PASSAR PELA META volta: %d\n",teams[team_index].team_name,cars[car_index].car_number,laps);
+                #endif
                 if(laps==config.laps_qnt || get_stop_race()){ //se chegou ao fim da corrida ou se tiver havido um 'pedido' para terminar a corrida
                     if(notif.car_state==SEGURANCA){
                         //SE O CARRO ESTIVER EM SEGURANÇA QUANDO TERMINAR A CORRIDA, É NECESSÁRIO DECREMENTAR O NÚMERO DE CARROS EM SEGURANÇA EM MEMÓRIA PARTILHADA JÁ Q O ESTADO DA BOX DEPENDE DISSO
@@ -760,9 +825,9 @@ void *car_thread(void *void_index){
                         pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
                     }
 
-                    notif.car_state=TERMINADO;
+                    notif.car_state=TERMINADO; cars[car_index].car_state=TERMINADO;
                     #ifdef DEBUG
-                    printf("[DEBUG] thread said: CAR NUMBER [%s] FROM TEAM [%s] FINISHED RACE!\n",cars[car_index].car_number,teams[team_index].team_name);
+                    printf("[DEBUG] CAR NUMBER [%s] FROM TEAM [%s] FINISHED RACE!\n",cars[car_index].car_number,teams[team_index].team_name);
                     #endif
 
                     //NOTIFICAR race manager process através de unnamed pipe
@@ -773,6 +838,9 @@ void *car_thread(void *void_index){
                     break; //TERMINOU CORRIDA!
                 }
                 else if(notif.car_state==SEGURANCA){ 
+                    #ifdef DEBUG
+                    printf("[DEBUG] equipa [%s] carro [%s] a tentar entrar na box em modo de seguranca\n",teams[team_index].team_name,cars[car_index].car_number);
+                    #endif
                     //ENTRA NA BOX SE ESTIVER LIVRE OU RESERVADA
                     pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
                     if(teams[team_index].box_state!=OCUPADA){
@@ -780,26 +848,34 @@ void *car_thread(void *void_index){
                         pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES OCUPADA
                         pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state); //unlock so that Team manager can change state of BOX and other cars can read 
                         
-                        notif.car_state=BOX; //CARRO NA BOX
+                        notif.car_state=BOX; cars[car_index].car_state=BOX;//CARRO NA BOX
                         //NOTIFICAR race manager process através de unnamed pipe
                         pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
                         write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
                         pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
                         
                         //REPARA O CARRO (demora um intervalo de tempo aleatorio entre reparacao_min_time e reparacao_max_time)
-                        usleep((unsigned int)((config.reparacao_min_time*1000000+rand_r(&seed)%(unsigned int)(config.reparacao_max_time*1000000+1))*(1/config.time_unit))); //rand_r is reentrant..thread safe :) 
+                        repair_time=(unsigned int)((config.reparacao_min_time*1000000+rand_r(&seed)%(unsigned int)(config.reparacao_max_time*1000000+1))*(1/config.time_unit));
+                        usleep(repair_time); //rand_r is reentrant..thread safe :) 
                         //ATESTA O CARRO 
                         fuel=config.fuel_capacity; 
                         usleep((unsigned int)(2*(1000000/config.time_unit))); 
+
+                        #ifdef DEBUG
+                        printf("[DEBUG] equipa [%s] carro [%s] atestou (2 time units) e reparou carro (%2.f segundos) \n",teams[team_index].team_name,cars[car_index].car_number,(float)repair_time/1000000);
+                        #endif
 
                         pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
                         teams[team_index].car_in_box--; //LEAVE BOX
                         teams[team_index].cars_in_safety_mode--;
                         pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES LIVRE AGAIN
                         pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
+                        #ifdef DEBUG
+                        printf("[DEBUG] equipa [%s] carro [%s] saiu da box!\n",teams[team_index].team_name,cars[car_index].car_number);
+                        #endif
 
                         low_fuel=0; //reset
-                        notif.car_state=CORRIDA; //CARRO DEIXA DE ESTAR EM SEGURANÇA E VOLTA A ESTAR EM MODO CORRIDA
+                        notif.car_state=CORRIDA; cars[car_index].car_state=CORRIDA;//CARRO DEIXA DE ESTAR EM SEGURANÇA E VOLTA A ESTAR EM MODO CORRIDA
                         //NOTIFICAR race manager process através de unnamed pipe
                         pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
                         write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro através de unnamed pipe
@@ -810,6 +886,9 @@ void *car_thread(void *void_index){
                     }                    
                 }
                 else if(low_fuel){ 
+                    #ifdef DEBUG
+                    printf("[DEBUG] equipa [%s] carro [%s] a tentar entrar na box porque tem pouca gasolina\n",teams[team_index].team_name,cars[car_index].car_number);
+                    #endif
                     //ENTRA NA BOX SE ESTIVER LIVRE
                     pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
                     if(teams[team_index].box_state==LIVRE){ //|| (notif.car_state==SEGURANCA && teams[team_index].box_state==RESERVADA)
@@ -817,7 +896,7 @@ void *car_thread(void *void_index){
                         pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES OCUPADA
                         pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state); //unlock so that Team manager can change state of BOX and other cars can read 
                         
-                        notif.car_state=BOX; //CARRO NA BOX
+                        notif.car_state=BOX; cars[car_index].car_state=BOX; //CARRO NA BOX
                         //NOTIFICAR race manager process através de unnamed pipe
                         pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
                         write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
@@ -827,13 +906,21 @@ void *car_thread(void *void_index){
                         fuel=config.fuel_capacity; 
                         usleep((unsigned int)(2*(1000000/config.time_unit)));
 
+                        #ifdef DEBUG
+                        printf("[DEBUG] equipa [%s] carro [%s] atestou o carro (2 time units)\n",teams[team_index].team_name,cars[car_index].car_number);
+                        #endif
+
                         pthread_mutex_lock(&teams[team_index].mutex_car_changed_state);
                         teams[team_index].car_in_box--; //LEAVE BOX
                         pthread_cond_signal(&teams[team_index].car_changed_state_cond); //BOX BECOMES LIVRE AGAIN
                         pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state);
 
+                        #ifdef DEBUG
+                        printf("[DEBUG] equipa [%s] carro [%s] saiu da box!\n",teams[team_index].team_name,cars[car_index].car_number);
+                        #endif
+
                         low_fuel=0; //reset
-                        notif.car_state=CORRIDA; //CARRO DE VOLTA EM MODO CORRIDA
+                        notif.car_state=CORRIDA; cars[car_index].car_state=CORRIDA; //CARRO DE VOLTA EM MODO CORRIDA
                         //NOTIFICAR race manager process através de unnamed pipe
                         pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
                         write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
@@ -845,28 +932,25 @@ void *car_thread(void *void_index){
                 }
             }
             if(fuel<=0){
-                notif.car_state=DESISTENCIA;
+                #ifdef DEBUG
+                printf("[DEBUG] equipa [%s] carro [%s] ficou sem gasolina antes de conseguir acabar a corrida!\n",teams[team_index].team_name,cars[car_index].car_number);
+                #endif
+                notif.car_state=DESISTENCIA; cars[car_index].car_state=DESISTENCIA;
                 //NOTIFICAR race manager process através de unnamed pipe
                 pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe);
                 write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
                 pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe);
-
                 break; //TERMINOU CORRIDA 
+
             }
         }
+        printf("[DEBUG] equipa [%s] carro [%s] | break-> TERMINOU CORRIDA state:%s\n",teams[team_index].team_name,cars[car_index].car_number,car_state_to_str(notif.car_state));
         
     }
 
 
 
-    //car thread function. cada car thread é responsavel pela gestao das voltas a pista, pela gestao do combustivel, e pela gestao do modo de circulacao(normal ou em segurança)
-    #ifdef DEBUG
-    printf("[DEBUG] hello i'm car number [%s] :)\n",cars[car_index].car_number);
-    #endif
-
-
-
-    
+    //car thread function. cada car thread é responsavel pela gestao das voltas a pista, pela gestao do combustivel, e pela gestao do modo de circulacao(normal ou em segurança)    
     return NULL;
 }
 
@@ -879,6 +963,7 @@ void malfunction_manager(void){
     while(1){
         pthread_mutex_lock(&shared_memory->mutex_race_state);
         while(shared_memory->race_state==OFF){ //fica em espera enquanto a corrida não começa
+            //desbloqueia quando shares_memory->race_state==ON
             pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
         }
         pthread_mutex_unlock(&shared_memory->mutex_race_state);

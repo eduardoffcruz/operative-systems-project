@@ -64,7 +64,6 @@ typedef struct mem_struct{
     int wait_to_read;
     int stop_race; //signal triggered
 
-
     //STATS
     int malfunction_counter; //contador de avarias durante a corrida
     int fuel_counter; //contador de abastecimentos realizados durante a corrida
@@ -77,14 +76,14 @@ typedef struct mem_struct{
 
 //Car
 typedef struct car{
-    pthread_t thread;
+    pthread_t thread; 
     char car_number[32];
     int speed;
     float consumption;
     int reliability;
 
     int team_index;
-    //enum car_state_type car_state;
+    enum car_state_type car_state;
 }car;
 
 //Teams 
