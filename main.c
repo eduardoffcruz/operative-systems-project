@@ -786,7 +786,7 @@ void *car_thread(void *void_index){
         total_meters=0;
         laps=0;
         pthread_mutex_lock(&shared_memory->mutex_race_state);
-        while((shared_memory->race_state==OFF || cars[car_index].car_state!=CORRIDA) && (stop_race_aux=get_stop_race)!=-1){
+        while((shared_memory->race_state==OFF || cars[car_index].car_state!=CORRIDA) && (stop_race_aux=get_stop_race())!=-1){
             //desbloqueia quando: (shared_memory->race_state==ON && notif.car_state==CORRIDA) || shared_memory->stop_race==-1
             pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
         }
@@ -1008,8 +1008,8 @@ void malfunction_manager(void){
     while(1){
         printf("5 detect espera ativa..\n");
         pthread_mutex_lock(&shared_memory->mutex_race_state);
-        while(shared_memory->race_state==OFF && (shares_memory->race_state==ON || aux_stop_race=get_stop_race())!=-1){ //fica em espera enquanto a corrida não começa
-            //desbloqueia quando shares_memory->race_state==ON || (shares_memory->race_state==ON && shares_memory->stop_race==-1)
+        while(shared_memory->race_state==OFF && (shared_memory->race_state==ON || aux_stop_race=get_stop_race())!=-1){ //fica em espera enquanto a corrida não começa
+            //desbloqueia quando shared_memory->race_state==ON || (shared_memory->race_state==ON && shared_memory->stop_race==-1)
             pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
         }
         if(shared_memory->race_state==OFF && aux_stop_race==-1){ //se a corrida estiver terminada ou ainda n tiver começado
