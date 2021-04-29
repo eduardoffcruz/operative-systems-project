@@ -400,6 +400,7 @@ void race_manager(void){
     char buff[BUFF_SIZE];
     struct notification notif; 
     int finished_race_car_count=0;
+    int exited_team_managers=0; //used only when ctrl+c (SIGINT) handler is triggered..team manager process notifies race manager via team manager's unnamed pipe so that he can acknoledge that all team manager's exited sucessfully and race manager can exit too 
 
     
 
@@ -447,33 +448,41 @@ void race_manager(void){
             for(i=0;i<config.teams_qnt;i++){
                 if(FD_ISSET(fd_unnamed_pipe[i][0],&read_set)){
                     read(fd_unnamed_pipe[i][0], &notif, sizeof(struct notification));
-                    sprintf(buff,"CAR %s FROM TEAM [%s] CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[i].team_name,car_state_to_str(notif.car_state));
-                    write_log(buff);
-                    //count cars in TERMINADO state
-                    if(notif.car_state==TERMINADO){
-                        finished_race_car_count++; //+1
-                        if(finished_race_car_count==1){
-                            sprintf(buff,"CAR %s WINS THE RACE",cars[notif.car_index].car_number);
-                            write_log(buff);
+                    if(notif.car_state==-1){ //notification from team manager process
+                        exited_team_managers++;
+                        wait(NULL); //ACKNOLEDGE CHILD'S PROCESS DEAD
+                        if(exited_team_managers==config.teams_qnt){
+                            exit(0);
                         }
-                        if(finished_race_car_count==get_total_car_count()){ //se todos os carros tiverem terminado a corrida..
-                            pthread_mutex_lock(&shared_memory->mutex_race_state);
-                            shared_memory->race_state=OFF; //todos os carros terminaram a corrida logo..estado da corrida == OFF
-                            pthread_mutex_unlock(&shared_memory->mutex_race_state);
-                            //SIGNAL ALL TEAM BOXES that race has finished (new race_state = OFF)
-                            for(j=0;j<config.teams_qnt;j++){
-                                pthread_mutex_lock(&teams[j].mutex_car_changed_state);
-                                pthread_cond_signal(&teams[j].car_changed_state_cond); //signal each TEAM BOX (1 per team)
-                                pthread_mutex_unlock(&teams[j].mutex_car_changed_state);
+                    }else{ //notification from car threads! 
+                        sprintf(buff,"CAR %s FROM TEAM [%s] CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[i].team_name,car_state_to_str(notif.car_state));
+                        write_log(buff);
+                        //count cars in TERMINADO state
+                        if(notif.car_state==TERMINADO){
+                            finished_race_car_count++; //+1
+                            if(finished_race_car_count==1){
+                                sprintf(buff,"CAR %s WINS THE RACE",cars[notif.car_index].car_number);
+                                write_log(buff);
                             }
-                            if(get_stop_race()==-1){
-                                for(j=0;j<config.teams_qnt;j++) wait(NULL); //wait for team_manager processes to finish.. 
-                                #ifdef DEBUG  
-                                printf("[DEBUG] all Team Manager processes ended\n");
-                                #endif
-                                exit(0); //end race manager process after ending team_manager processes
+                            if(finished_race_car_count==get_total_car_count()){ //se todos os carros tiverem terminado a corrida..
+                                pthread_mutex_lock(&shared_memory->mutex_race_state);
+                                shared_memory->race_state=OFF; //todos os carros terminaram a corrida logo..estado da corrida == OFF
+                                pthread_mutex_unlock(&shared_memory->mutex_race_state);
+                                //SIGNAL ALL TEAM BOXES that race has finished (new race_state = OFF)
+                                for(j=0;j<config.teams_qnt;j++){
+                                    pthread_mutex_lock(&teams[j].mutex_car_changed_state);
+                                    pthread_cond_signal(&teams[j].car_changed_state_cond); //signal each TEAM BOX (1 per team)
+                                    pthread_mutex_unlock(&teams[j].mutex_car_changed_state);
+                                }
+                                if(get_stop_race()==-1){
+                                    for(j=0;j<config.teams_qnt;j++) wait(NULL); //wait for team_manager processes to finish.. 
+                                    #ifdef DEBUG  
+                                    printf("[DEBUG] all Team Manager processes ended\n");
+                                    #endif
+                                    exit(0); //end race manager process after ending team_manager processes
+                                }
+                                set_stop_race(0);
                             }
-                            set_stop_race(0);
                         }
                     }
                 }
@@ -572,6 +581,7 @@ void handle_sigint_sigtstp(int signum){ //no processo main (!)
         //após todos os carros concluirem a corrida imprimir as estatisticas, terminar,libertar e remover todos os recursos utilizados
         //TODO:
         set_stop_race(-1); //termina o programa
+        printf("[DEBUG] STOP RACE SET TO -1!\n");
         pthread_mutex_lock(&shared_memory->mutex_race_state);
         pthread_cond_broadcast(&shared_memory->race_state_cond);
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
@@ -585,7 +595,7 @@ void handle_sigint_sigtstp(int signum){ //no processo main (!)
 
         write_log("SIMULATOR CLOSING");
         clean_resources(); 
-        exit(0); //sucessfully end MAIN process --> ALL PROCESSES FINISHED RUNNING
+        exit(0); //sucessfully end MAIN process (all child processes exited and their deads were acknoledge bye their fathers!)
         
     }else if(signum==SIGTSTP){
         write_log("SIGNAL SIGTSTP RECEIVED");
@@ -613,6 +623,7 @@ void team_manager(int team_id){
     char aux[BUFF_SIZE];
     int tmp;
     int aux_stop_race;
+    struct notification exited_notif;
     
     //save last values
     int last_car_in_box=0; //false
@@ -640,6 +651,12 @@ void team_manager(int team_id){
                 pthread_mutex_unlock(&shared_memory->mutex_race_state);
                 //wait for car threads to end..
                 for(int j=0;j<i;j++) pthread_join(cars[team_id*config.max_car_qnt_per_team+j].thread,NULL); 
+                //notify race_manager through unnamed pipe so that race_manager process knows that all car threads from this team sucessfuly exited...and now this team_manager process will exit too :)
+                //so race_manager can acknoledge it end exit himself when all team_manager processes finish!  
+                //no need to synch this write because all threads are finished and we know for sure that no process or thread will be using this unnamed pipe (one unnamed pipe per team)
+                //NOTIFICAR race manager process através de unnamed pipe para ele saber qnd é q todas as threads foram terminadas e poder terminar o processo race_manager
+                exited_notif.car_state=-1; //exit
+                write(fd_unnamed_pipe[team_id][1],&exited_notif,sizeof(struct notification)); //notifica alteração de estado do carro
                 exit(0); //safely END PROCESS
             }
             shared_memory->new_car_team=-1;//reset
@@ -686,6 +703,12 @@ void team_manager(int team_id){
                 if(get_stop_race()==-1){
                     //wait for car threads to end..
                     for(int j=0;j<i;j++) pthread_join(cars[team_id*config.max_car_qnt_per_team+j].thread,NULL); 
+                    //notify race_manager through unnamed pipe so that race_manager process knows that all car threads from this team sucessfuly exited...and now this team_manager process will exit too :)
+                    //so race_manager can acknoledge it end exit himself when all team_manager processes finish!  
+                    //no need to synch this write because all threads are finished and we know for sure that no process or thread will be using this unnamed pipe (one unnamed pipe per team)
+                    //NOTIFICAR race manager process através de unnamed pipe para ele saber qnd é q todas as threads foram terminadas e poder terminar o processo race_manager
+                    exited_notif.car_state=-1; //exit
+                    write(fd_unnamed_pipe[team_id][1],&exited_notif,sizeof(struct notification)); //notifica alteração de estado do carro
                     exit(0); //safely end process
                 }else{
                     break; //exit while loop & restart
@@ -792,6 +815,7 @@ void *car_thread(void *void_index){
         }
         pthread_mutex_unlock(&shared_memory->mutex_race_state);
         if(stop_race_aux==-1){ //terminar o programa
+            printf("[DEBUG] THREAD carro %s equipa %s TERMINADA\n",cars[car_index].car_number,teams[team_index].team_name);
             pthread_exit(NULL);
         }
         notif.car_state=CORRIDA;
@@ -1008,7 +1032,7 @@ void malfunction_manager(void){
     while(1){
         printf("5 detect espera ativa..\n");
         pthread_mutex_lock(&shared_memory->mutex_race_state);
-        while(shared_memory->race_state==OFF && (shared_memory->race_state==ON || aux_stop_race=get_stop_race())!=-1){ //fica em espera enquanto a corrida não começa
+        while(shared_memory->race_state==OFF && (shared_memory->race_state==ON || (aux_stop_race=get_stop_race())!=-1)){ //fica em espera enquanto a corrida não começa
             //desbloqueia quando shared_memory->race_state==ON || (shared_memory->race_state==ON && shared_memory->stop_race==-1)
             pthread_cond_wait(&shared_memory->race_state_cond,&shared_memory->mutex_race_state);
         }
