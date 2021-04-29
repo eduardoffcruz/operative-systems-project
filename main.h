@@ -45,14 +45,7 @@ typedef struct mem_struct{
 
     int curr_teams_qnt; //current teams qnt
 
-    //...
-    //para synchronizacao na escrita e criação de equipas+carros 
-/*
-    int readers_in;
-    int readers_out;
-    int wait;
-    */
-    int new_car_team; //indicação da equipa onde foi adicionado o novo carro
+    int new_car_team; //indicação da equipa onde foi adicionado o novo carro (protected by mutex_race_state)
 
     pthread_mutex_t mutex_race_state;
     pthread_cond_t race_state_cond;
@@ -65,6 +58,7 @@ typedef struct mem_struct{
     int stop_race; //signal triggered
 
     //STATS
+    //pthread_mutex_t mutex_stats; //process shared (lighter weight than semaphores)
     int malfunction_counter; //contador de avarias durante a corrida
     int fuel_counter; //contador de abastecimentos realizados durante a corrida
 
