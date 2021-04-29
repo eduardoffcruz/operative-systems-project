@@ -106,6 +106,12 @@ typedef struct notification{
     enum car_state_type car_state;
 }notification;
 
+//MESSAGE 
+typedef struct message{
+    long mtype;
+    int val;
+}message;
+
 //STATS
 typedef struct stats{
     int total_malfunctions; //total de avarias ocorridas durante a corrida
@@ -124,6 +130,7 @@ mem_struct *shared_memory;
 team *teams;
 car *cars;
 /********************/
+int mq_id; //msg queue identifier
 //semaphores
 sem_t* sem_log; //used to assure mutual exclusion when writing to log file and to stdout
 
@@ -176,3 +183,4 @@ void set_stop_race(int i);
 int get_stop_race();
 char* box_state_to_str(int state);
 char *car_state_to_str(int car_state);
+int get_total_car_count();

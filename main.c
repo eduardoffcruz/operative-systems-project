@@ -52,7 +52,7 @@ int main(void){
     sem_unlink("SEM_STATS");
     sem_stats=sem_open("SEM_STATS",O_CREAT|O_EXCL,0700,1); 
 
-/*
+    /*
     //para bloquear/desbloquear gerador de avarias no processo malfunction_manager
     sem_unlink("SEM_MALFUNCTION_GENERATOR");
     sem_malfunction_generator=sem_open("SEM_MALFUNCTION_GENERATOR",O_CREAT|O_EXCL,0700,0);  */
@@ -85,6 +85,12 @@ int main(void){
     signal(SIGINT,SIG_IGN); //set "all" processes to ignore SIGINT and 
     signal(SIGTSTP,SIG_IGN); //.."all" processes ignore SIGTSTP
     signal(SIGUSR1,SIG_IGN); //.."all" processes ignore SIGUSR1
+
+    //CREATE MESSAGE QUEUE
+    if((mq_id = msgget(IPC_PRIVATE, IPC_CREAT|0777))<0){
+        write_log("[ERROR] unable to create message queue");
+        shutdown_all();
+    }
 
     write_log("SIMULATOR STARTING");
 
@@ -356,7 +362,7 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
         }
         for(k=0;k<j;k++){
             if(strcmp(cars[i*config.max_car_qnt_per_team+k].car_number,car_number)==0){
-                sprintf(aux,"UNABLE TO ADD CAR [%s], CAR ALREADY EXISTS IN TEAM [%s]",team_name);
+                sprintf(aux,"UNABLE TO ADD CAR %s, CAR ALREADY EXISTS IN TEAM [%s]",car_number,team_name);
                 write_log(aux);
                 return -1; //FAILED
             }
@@ -463,7 +469,7 @@ void race_manager(void){
                             //SIGNAL ALL TEAM BOXES that race has finished (new race_state = OFF)
                             for(j=0;j<config.teams_qnt;j++){
                                 pthread_mutex_lock(&teams[j].mutex_car_changed_state);
-                                pthread_cond_signal(&teams[j].car_changed_state_cond);
+                                pthread_cond_signal(&teams[j].car_changed_state_cond); //signal each TEAM BOX (1 per team)
                                 pthread_mutex_unlock(&teams[j].mutex_car_changed_state);
                             }
                         }
@@ -473,16 +479,17 @@ void race_manager(void){
         }
     }
 
-
+    //not reachable...
     for(i=0;i<config.teams_qnt;i++) wait(NULL);  
     #ifdef DEBUG  
     printf("[DEBUG] all Team Manager processes ended\n");
     #endif
-    //TODO:processo resposavel pela gestao da corrida(inicio, fim, classificacao final) e das equipas em jogo.
+
+    //processo resposavel pela gestao da corrida(inicio, fim, classificacao final) e das equipas em jogo.
 }
 
 int get_total_car_count(){
-    //careful with synchronized acess!
+    //careful with synchronized access!
     //will be used for reading only, make sure that no process or thread can write these values when reading
     int i,counter=0;
     for(i=0;i<config.teams_qnt;i++){ //this function will be used only when all teams have been loaded! (after race started)
@@ -594,9 +601,9 @@ void team_manager(int team_id){
     //car threads sao criadas através da receção de comandos através do named pipe 
     int *cars_index;
     int i=0,j; //team's current car count (in process)
-    int char aux[BUFF_SIZE];
-    race_state_type tmp;
-
+    char aux[BUFF_SIZE];
+    int tmp;
+    
     //save last values
     int last_car_in_box=0; //false
     int last_cars_in_safety_mode=0; 
@@ -652,7 +659,7 @@ void team_manager(int team_id){
             //DESBLOQUEAR ISTO E SAIR QND O RACE_STATE == OFF
             //TODO: VERIFICAR SE ESTÁ BEM SYNCH A PARTE DO race_state :/ 
             pthread_mutex_lock(&teams[team_id].mutex_car_changed_state);                                                     
-            while(teams[team_id].car_in_box==last_car_in_box && teams[team_id].cars_in_safety_mode==last_cars_in_safety_mode && (tmp=get_race_state)==ON){ //UNLOCK ON CHANGE
+            while(teams[team_id].car_in_box==last_car_in_box && teams[team_id].cars_in_safety_mode==last_cars_in_safety_mode && (tmp=get_race_state())==ON){ //UNLOCK ON CHANGE
                 //desbloqueia quando: teams[team_id].car_in_box!=last_car_in_box || teams[team_id].cars_in_safety_mode!=last_cars_in_safety_mode || race_state==OFF
                 pthread_cond_wait(&teams[team_id].car_changed_state_cond,&teams[team_id].mutex_car_changed_state);
             }
@@ -731,13 +738,17 @@ void *car_thread(void *void_index){
     int team_index=cars[car_index].team_index; 
     struct notification notif; // used to send car state info to race manager process
     int total_meters;
-    int laps=0; //voltas
+    int laps; //voltas
     float fuel; //starts with Deposit max capacity
 
     int low_fuel; //flag
 
     unsigned int seed = getpid()*time(NULL)+car_index; //thread seed
     unsigned int repair_time; //rand between min and max from config^
+
+    struct message msg; //malfunction message
+    int msg_id=(team_index+1)*config.max_car_qnt_per_team+(car_index+1);
+    int malfunction_counter=0; 
 
     notif.car_index=car_index;
 
@@ -769,10 +780,12 @@ void *car_thread(void *void_index){
                 printf("[DEBUG] equipa [%s] carro [%s] metros percorridos: %d | gasolina: %f (em seguranca)\n",teams[team_index].team_name,cars[car_index].car_number,total_meters,fuel);
                 #endif
 
-                if(fuel<((2*config.track_len)/cars[car_index].speed)*cars[car_index].consumption){ // tempo necessário para realizar 4 voltas->{ ((4*config.track_len)/cars[car_index].speed) }  * cars[car_index].consumption
-                    //se não tiver COMBUSTIVEL NECESSÁRIO PARA REALIZAR +4 VOLTAS entra em modo SEGURANÇA
+                while(msgrcv(mq_id,&msg,sizeof(struct message)-sizeof(long),msg_id,IPC_NOWAIT)>0) malfunction_counter++; //read(clean) all messages from message queue with mtype==msg_id ... para evitar que a message queue fique cheia
+                if(malfunction_counter || fuel<((2*config.track_len)/cars[car_index].speed)*cars[car_index].consumption){ // IPC_NOWAIT para que a thread n bloqueie caso n exista nenhuma mensagem com o mtype == msg_id na message queue!
+                    //se receber msg do malfucntion_manager ou se não tiver COMBUSTIVEL NECESSÁRIO PARA REALIZAR +4 VOLTAS entra em modo SEGURANÇA
                     notif.car_state=SEGURANCA; cars[car_index].car_state=SEGURANCA;
                     low_fuel=0; //reset
+                    malfunction_counter=0; //reset
                     //atualizar na shm
                     #ifdef DEBUG
                     printf("[DEBUG] equipa [%s] carro [%s] entrou em segurança por n ter combustivel para +2 voltas\n",teams[team_index].team_name,cars[car_index].car_number);
@@ -809,7 +822,7 @@ void *car_thread(void *void_index){
             }
 
 
-            if(total_meters/config.track_len>laps){ //PASSOU NOVAMENTE PELA META
+            if(total_meters/config.track_len>laps){ //PASSOU PELA META
                 laps++; //adiciona volta
                 #ifdef DEBUG
                 printf("[DEBUG] equipa [%s] carro [%s] ACABOU DE PASSAR PELA META volta: %d\n",teams[team_index].team_name,cars[car_index].car_number,laps);
@@ -960,6 +973,9 @@ void malfunction_manager(void){
     int rand_num;
     int i,j;
     int malfunction_count=0;
+    struct message msg;
+    msg.val=0;
+
     while(1){
         pthread_mutex_lock(&shared_memory->mutex_race_state);
         while(shared_memory->race_state==OFF){ //fica em espera enquanto a corrida não começa
@@ -982,15 +998,11 @@ void malfunction_manager(void){
                     printf("[DEBUG] AVARIA NO CARRO number [%s] DA TEAM [%s]\n",cars[i*config.max_car_qnt_per_team+j].car_number,teams[i].team_name);
                     #endif
                     //...comunicar avaria ao carro, pela message queue 
+                    msg.mtype = (i+1)*config.max_car_qnt_per_team+(j+1);
+                    msgsnd(mq_id,&msg,sizeof(struct message)-sizeof(long),0); //flag==0...blocks if message queue is full!
                 }
             }
         }
-
-        /***************************************/                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
-        if(malfunction_count>100){
-            break;
-        }
-        /***************************************/
 
         //sem_post(sem_malfunction_generator);
     }
@@ -1125,6 +1137,7 @@ void clean_resources(){
         close(fd_unnamed_pipe[i][1]); //fd for writing
     }
     
+    msgctl(mq_id,IPC_RMID,NULL); //msg queue
 
     //close log file
     fclose(log_fp);
