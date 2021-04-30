@@ -72,11 +72,12 @@ typedef struct mem_struct{
 typedef struct car{
     pthread_t thread; 
     char car_number[32];
-    int speed;
+    int speed; 
     float consumption;
     int reliability;
 
     int team_index;
+
     enum car_state_type car_state;
 }car;
 
@@ -86,6 +87,7 @@ typedef struct team{
     int curr_car_qnt;
 
     pthread_mutex_t mutex_write_to_unnamed_pipe; //mutex para synchronizar escrita por vários carros de uma equipa no unnamed pipe dessa equipa
+    //^todas as alterações de estado dos carros são comunicadas através do unnamed pipe de cada equipa logo podemos aproveitar este mecanismo de synch para atualizar o estado do carro em memória partilhada
     /**********BOX**************/
     enum box_state_type box_state;
     int cars_in_safety_mode;
@@ -102,7 +104,9 @@ typedef struct notification{
 
 //MESSAGE 
 typedef struct message{
+    //header:
     long mtype;
+    //payload:
     int val;
 }message;
 
@@ -128,9 +132,6 @@ int mq_id; //msg queue identifier
 //semaphores
 sem_t* sem_log; //used to assure mutual exclusion when writing to log file and to stdout
 
-sem_t* sem_readers_in; //(mutex para proteger escrita em n_readers_in na shm) used to synchr writing and reading of new cars in shared memory
-sem_t* sem_readers_out; //mutex para proteger escrita em n_readers_out na shm
-sem_t* sem_writecar; //^
 
 sem_t* sem_stop_race_readers_in;
 sem_t* sem_stop_race_readers_out;
@@ -154,7 +155,7 @@ void team_manager(int );
 void read_config(void);
 void update_curr_time(void);
 void clean_resources(void);
-void shutdown_all(void);
+void forced_shutdown(void);
 void init_log(void);
 void write_log(char *log);
 void update_curr_time(void);
@@ -178,3 +179,4 @@ int get_stop_race();
 char* box_state_to_str(int state);
 char *car_state_to_str(int car_state);
 int get_total_car_count();
+int get_car_state_by_index(int team_index,int car_index);
