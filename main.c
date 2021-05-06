@@ -37,12 +37,10 @@ int main(void){
     sem_unlink("SEM_STATS");
     sem_stats=sem_open("SEM_STATS",O_CREAT|O_EXCL,0700,1); 
 
-    
     #ifdef DEBUG
     printf("[DEBUG] semaphores created\n");
     #endif
     /****************************/
-
 
     //INIT LOG file
     init_log();
@@ -62,9 +60,10 @@ int main(void){
         forced_shutdown(); 
     }
 
-    signal(SIGINT,SIG_IGN); //set "all" processes to ignore SIGINT and 
-    signal(SIGTSTP,SIG_IGN); //.."all" processes ignore SIGTSTP
-    signal(SIGUSR1,SIG_IGN); //.."all" processes ignore SIGUSR1
+    //set
+    signal(SIGINT,SIG_IGN); //"all" processes to ignore SIGINT and 
+    signal(SIGTSTP,SIG_IGN); //"all" processes ignore SIGTSTP
+    signal(SIGUSR1,SIG_IGN); //"all" processes ignore SIGUSR1
 
     //CREATE MESSAGE QUEUE
     if((mq_id = msgget(IPC_PRIVATE, IPC_CREAT|0777))<0){
@@ -279,7 +278,8 @@ void add_car_to_team(int i,int j,char* car_number, int speed, float consumption,
     cars[car_index].consumption=consumption;
     cars[car_index].reliability=reliability;
     cars[car_index].team_index=i;
-
+    cars[car_index].laps=0;
+    cars[car_index].box_stops=0;
     teams[i].curr_car_qnt++;
 }
 
@@ -333,7 +333,7 @@ int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consu
 }
 
 void start_race(){
-
+    int i;
     if(pthread_mutex_lock(&shared_memory->mutex_race_state)!=0){forced_shutdown();}
     //READ shared_memory->curr_teams_qnt
     if(shared_memory->curr_teams_qnt!=config.teams_qnt){  
@@ -343,6 +343,9 @@ void start_race(){
         //start race
         shared_memory->race_state=ON; 
         if(pthread_cond_broadcast(&shared_memory->race_state_cond)!=0){forced_shutdown();} //notify all waiting threads/processes
+        sem_wait(sem_stats);
+        for(i=0;i<config.teams_qnt;i++) shared_memory->cars_in_pista_qnt+=teams[i].curr_car_qnt; //no more cars will be added at this point so its safe to read
+        sem_post(sem_stats);
     }
     //se a corrida já estiver ON.. simplesmente ignora!
     if(pthread_mutex_unlock(&shared_memory->mutex_race_state)!=0){forced_shutdown();}
@@ -360,6 +363,7 @@ void race_manager(void){
     struct notification notif; 
     struct message msg;
     int finished_race_car_count=0;
+    int desistiu_race_car_count=0;
     int exited_team_managers=0; //used only when ctrl+c (SIGINT) handler is triggered..team manager process notifies race manager via team manager's unnamed pipe so that he can acknoledge that all team manager's exited sucessfully and race manager can exit too 
 
     //create TEAM MANAGER PROCESSes (1 per team)
@@ -406,6 +410,7 @@ void race_manager(void){
                 if(FD_ISSET(fd_unnamed_pipe[i][0],&read_set)){
                     read(fd_unnamed_pipe[i][0], &notif, sizeof(struct notification));
                     if(notif.car_state==-1){ //notification from team manager process
+                        //team manager notifies race manager that he (team manager process) died
                         exited_team_managers++;
                         wait(NULL); //ACKNOLEDGE CHILD'S PROCESS DEAD
                         if(exited_team_managers==config.teams_qnt){
@@ -414,32 +419,53 @@ void race_manager(void){
                             #endif
                             exit(0);
                         }
+                    else if(notif.car_state==-2){
+                        //car notifies race_manager that he crossed the line
+                        sem_wait(sem_stats);
+                        cars[notif.car_index].laps++; //+1 lap
+                        sem_post(sem_stats);
+                    }
                     }else{ //notification from car threads! 
                         sprintf(buff,"CAR %s FROM TEAM [%s] CHANGED STATE! => %s",cars[notif.car_index].car_number,teams[i].team_name,car_state_to_str(notif.car_state));
                         write_log(buff);
                         //count cars in TERMINADO state
-                        if(notif.car_state==TERMINADO){
-                            finished_race_car_count++; //+1
-                            if(finished_race_car_count==1){
-                                sprintf(buff,"CAR %s WINS THE RACE",cars[notif.car_index].car_number);
-                                write_log(buff);
-                            }
-                            else{
-                                sprintf(buff,"CAR %s FINISHED THE RACE [%do PLACE]",cars[notif.car_index].car_number,finished_race_car_count);
-                                write_log(buff);
+                        if(notif.car_state==TERMINADO||notif.car_state==DESISTENCIA){
+                            if(notif.car_state==TERMINADO){
+                                finished_race_car_count++; //+1
+                                if(finished_race_car_count==1){
+                                    sprintf(buff,"CAR %s WINS THE RACE",cars[notif.car_index].car_number);
+                                    write_log(buff);
+                                }
+                                else{
+                                    sprintf(buff,"CAR %s FINISHED THE RACE [%do PLACE]",cars[notif.car_index].car_number,finished_race_car_count);
+                                    write_log(buff);
+                                }
+                                sem_wait(sem_stats);
+                                cars[notif.car_index].laps++; //+1 lap
+                                sem_post(sem_stats);
+                            }else{
+                                //desistencia
+                                desistiu_race_car_count++;
                             }
 
-                            if(finished_race_car_count==get_total_car_count()){ //se todos os carros tiverem terminado a corrida..
+                            sem_wait(sem_stats);
+                            shared_memory->cars_in_pista_qnt--; 
+                            sem_post(sem_stats);
+
+                            if((desistiu_race_car_count+finished_race_car_count)==get_total_car_count()){ //se todos os carros tiverem terminado a corrida..
                                 if(pthread_mutex_lock(&shared_memory->mutex_race_state)!=0){forced_shutdown();}
                                 shared_memory->race_state=OFF; //todos os carros terminaram a corrida logo..estado da corrida == OFF
                                 if(pthread_mutex_unlock(&shared_memory->mutex_race_state)!=0){forced_shutdown();}
                                 write_log("---RACE FINISHED!---");
+                                //PRINT STATS
+                                print_stats();
+
                                 //SIGNAL ALL TEAM BOXES that race has finished (new race_state = OFF)
                                 //NOTIFY TEAM MANAGER's BOX (to check if the race is already over so it can 'close' the BOX)
                                 for(j=0;j<config.teams_qnt;j++){
                                     //printf("race_manager notificou team's box [%s] para ela saber q já acabou a corrida..!\n",teams[j].team_name);
                                     if(pthread_mutex_lock(&teams[j].mutex_car_changed_state)!=0){forced_shutdown();}
-                                    if(pthread_cond_signal(&teams[j].car_changed_state_cond)!=0){forced_shutdown();} //signal each TEAM BOX (1 per team)
+                                    if(pthread_cond_signal(&teams[j].car_changed_state_cond)!=0){forced_shutdown();} //signal each TEAM BOX (1 per team) so that it checks for the end of the race and restarts box
                                     if(pthread_mutex_unlock(&teams[j].mutex_car_changed_state)!=0){forced_shutdown();}
                                 }
                                 if(get_stop_race()==-1){
@@ -449,12 +475,28 @@ void race_manager(void){
                                     #endif
                                     exit(0); //end race manager process after ending team_manager processes
                                 }
-
-                                //clean avarias from message queue!
+                                //RESET STATS
+                                sem_wait(sem_stats);
+                                shared_memory->cars_in_pista_qnt=0;
+                                shared_memory->total_refuels=0;
+                                shared_memory->total_malfunctions=0;
+                                for(j=0;j<config.teams_qnt*config.max_car_qnt_per_team;j++){
+                                    cars[j].laps=0; 
+                                    cars[j].box_stops=0;
+                                }
+                                sem_post(sem_stats);
+                                //clean avarias q não foram lidas from message queue!
                                 while(msgrcv(mq_id,&msg,sizeof(struct message)-sizeof(long),0,IPC_NOWAIT)>0);
                                 set_stop_race(0);
                                 finished_race_car_count=0; //reset
+                                desistiu_race_car_count=0; //reset
                             }
+                        }
+                        else if(notif.car_state==BOX){
+                            sem_wait(sem_stats);
+                            shared_memory->total_refuels++; //todas as vezes q o carro vai à BOX dá refuel
+                            cars[notif.car_index].box_stops++; //increment box stops car counter
+                            sem_post(sem_stats);
                         }
                     }
                 }
@@ -518,21 +560,18 @@ void handle_sigusr1(){
     //e a sua estatistica final deve ser apresentada.
     //a informacao da interrupcao deve ser escrita no log 
     //(nao termina o programa, se start race for escrito, a corrida poderá ser novamente iniciada)
-    //TODO:
     write_log("SIGNAL SIGUSR1 RECEIVED");
     signal(SIGUSR1,SIG_IGN); //ignore sigur1 during handling
 
     if(get_race_state()==ON){
-        //set_race_state(PAUSE); 
-
-        //TODO: TERMINAR CORRIDA COMO CTRL+C 
+        //TERMINAR CORRIDA COMO CTRL+C (mas sem terminar processos!)
         if(pthread_mutex_lock(&shared_memory->mutex_race_state)!=0){forced_shutdown();}
         set_stop_race(1); //não termina o programa
         if(pthread_cond_broadcast(&shared_memory->race_state_cond)!=0){forced_shutdown();}
         if(pthread_mutex_unlock(&shared_memory->mutex_race_state)!=0){forced_shutdown();}
         write_log("RACE INTERRUPTED! WAIT FOR ALL CARS TO REACH FINISH LINE..");
 
-        //....
+        //....stats will be printed after the race finishes
     }
 
     signal(SIGUSR1,handle_sigusr1); //re-set handler    
@@ -540,13 +579,13 @@ void handle_sigusr1(){
 
 void handle_sigint_sigtstp(int signum){ //no processo main (!)
     if(signum==SIGINT){
-        write_log("SIGNAL SIGINT RECEIVED");
-        signal(SIGINT,SIG_IGN); //ignore sigint during handling
         //sigint: aguardar q todos os carros cruzem a meta (mesmo q n seja a sa ultima volta), os carros q se encontram na box no momento da instrução devem terminar. aposto doso os carros concluirem a corrida deverá imprimir as estatisticas do jogo e terminal/libertar/remover todos os recursos utilizados
         //aguardar q todos os carros cruzem a meta (mesmo q n seja a sua ultima volta)
         //os carros q se encontram na box neste momento devem terminar
         //após todos os carros concluirem a corrida imprimir as estatisticas, terminar,libertar e remover todos os recursos utilizados
-        //TODO:
+        write_log("SIGNAL SIGINT RECEIVED");
+        signal(SIGINT,SIG_IGN); //ignore sigint during handling
+        
         set_stop_race(-1); //termina o programa
 
         if(pthread_mutex_lock(&shared_memory->mutex_race_state)!=0){forced_shutdown();}
@@ -557,7 +596,8 @@ void handle_sigint_sigtstp(int signum){ //no processo main (!)
             write_log("RACE INTERRUPTED! WAIT FOR ALL CARS TO REACH FINISH LINE..");
         }
 
-        wait(NULL);wait(NULL); //esperar q os 2 processos filhos (race_manager & malfunction_manager) terminem
+        //wait(NULL);wait(NULL); 
+        while (wait(NULL) != -1); //esperar q os 2 processos filhos (race_manager & malfunction_manager) terminem
         #ifdef DEBUG
         printf("[DEBUG] Race Manager process and Malfunction Manager process ended\n");
         #endif
@@ -582,9 +622,9 @@ enum race_state_type get_race_state(){
 
 void team_manager(int team_id){
     //gere a box e carros da equipa. responsavel pela reparacao dos carros da equipa e por atestar o deposito de combustivel
-    //TODO: team manager processes create car threads
-    //TODO: team manager escreve as informações de cada carro, recebidas do Named Pipe, na shared_emmory
-    //TODO: manter atualizada na shared_memory, o estado da box! (LIVRE;OCUPADA;RESERVADA)
+    //team manager processes create car threads
+    //team manager escreve as informações de cada carro, recebidas do Named Pipe, na shared_emmory
+    //manter atualizada na shared_memory, o estado da box! (LIVRE;OCUPADA;RESERVADA)
     //car threads sao criadas através da receção de comandos através do named pipe 
     int *cars_index;
     
@@ -856,7 +896,8 @@ void *car_thread(void *void_index){
                 #ifdef DEBUG
                 printf("[DEBUG] car %s from team %s -> acabou de passar pela meta | volta: %d\n",cars[car_index].car_number,teams[team_index].team_name,laps);
                 #endif
-                if(laps==config.laps_qnt || (stop_race_aux=get_stop_race())!=0){ //se chegou ao fim da corrida ou se tiver havido um 'pedido' para terminar a corrida
+                if(laps==config.laps_qnt || (stop_race_aux=get_stop_race())!=0){ 
+                    //se chegou ao fim da corrida ou se tiver havido um 'pedido' para terminar a corrida
                     car_state_aux=notif.car_state;
                     notif.car_state=TERMINADO; 
 
@@ -903,7 +944,7 @@ void *car_thread(void *void_index){
                         if(pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe)!=0){forced_shutdown();}
                         
                         //REPARA O CARRO (demora um intervalo de tempo aleatorio entre reparacao_min_time e reparacao_max_time)
-                        repair_time=(unsigned int)((config.reparacao_min_time*1000000+rand_r(&seed)%(unsigned int)(config.reparacao_max_time*1000000+1))*(1/config.time_unit));
+                        repair_time=(unsigned int)((config.reparacao_min_time*1000000+rand_r(&seed)%(unsigned int)(config.reparacao_max_time*1000000+1-config.reparacao_min_time*1000000))*(1/config.time_unit));
                         if(usleep(repair_time)==-1){forced_shutdown();} //rand_r is reentrant..thread safe :) 
                         //ATESTA O CARRO 
                         fuel=config.fuel_capacity; 
@@ -982,9 +1023,13 @@ void *car_thread(void *void_index){
                         if(pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe)!=0){forced_shutdown();}
                     }else{
                         if(pthread_mutex_unlock(&teams[team_index].mutex_car_changed_state)!=0){forced_shutdown();}
-                    }
-                    
+                    } 
                 }
+                //NOTIFICAR +1 VOLTA
+                notif.car_state=-2; //notifies race_manager, através de unnamed pipe, que passou na meta (synch eficiency purposes)
+                if(pthread_mutex_lock(&teams[team_index].mutex_write_to_unnamed_pipe)!=0){forced_shutdown();}
+                write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
+                if(pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe)!=0){forced_shutdown();}
             }
             if(fuel<=0){
                 #ifdef DEBUG
@@ -996,6 +1041,13 @@ void *car_thread(void *void_index){
                 write(fd_unnamed_pipe[team_index][1],&notif,sizeof(notif)); //notifica alteração de estado do carro
                 cars[car_index].car_state=DESISTENCIA; //update shm
                 if(pthread_mutex_unlock(&teams[team_index].mutex_write_to_unnamed_pipe)!=0){forced_shutdown();}
+
+                if(get_stop_race()==-1){ //exit thread!
+                    #ifdef DEBUG
+                    printf("[DEBUG] car %s thread from team %s exited\n",cars[car_index].car_number,teams[team_index].team_name);
+                    #endif
+                    pthread_exit(NULL);
+                }
                 break; //TERMINOU CORRIDA 
             }
         }
@@ -1019,7 +1071,6 @@ void malfunction_manager(void){
     int i,j;
     int car_index;
     int aux_stop_race;
-    int malfunction_counter=0;
     struct message msg;
     msg.val=0; //payload da mensagem de avaria
 
@@ -1044,14 +1095,17 @@ void malfunction_manager(void){
                 if(get_car_state_by_index(i,car_index)==CORRIDA){ //GERAR AVARIAS APENAS EM CARROS Q SE ENCONTRAM EM MODO DE CORRIDA (desnecessário estar a mandar msgs de avaria pela msg queue para carros aos quais essa avaria não terá qlqr impacto)
                     rand_num=rand()%101; //generate random number from [0-100]
                     if(rand_num>=cars[car_index].reliability){ 
-                        //AVARIA NO CARRO rand_num>=cars[car_index]
-                        malfunction_counter++;
+                        //AVARIA NO CARRO se rand_num>=cars[car_index]
                         #ifdef DEBUG
                         printf("[DEBUG] avaria gerada no car number [%s] da team [%s]\n",cars[car_index].car_number,teams[i].team_name);
                         #endif
                         //...comunicar avaria ao carro, pela message queue 
                         msg.mtype = (i+1)*config.max_car_qnt_per_team+(j+1);
                         if(msgsnd(mq_id,&msg,sizeof(struct message)-sizeof(long),0)==-1){forced_shutdown();} //flag==0...blocks if message queue is full!
+                    
+                        sem_wait(sem_stats); //podiamos incrementar o nr de avarias nos carros mas isso poderia trazer problemas de eficiência..daí termos escolhido incrementar o valor neste processo
+                        shared_memory->total_malfunctions++;
+                        sem_post(sem_stats);
                     }
                 }
             }
@@ -1082,7 +1136,10 @@ void init_shared_memory(void){
     shared_memory->new_car_team=-1;
     shared_memory->stop_race=0;
 
-    //TODO: INIT STATS
+    //INIT STATS
+    shared_memory->total_malfunctions=0;
+    shared_memory->total_refuels=0;
+    shared_memory->cars_in_pista_qnt=0;
     
     teams=(team*)(shared_memory+1);
     cars=(car*)(teams+config.teams_qnt);
@@ -1099,19 +1156,59 @@ void init_shared_memory(void){
     if(pthread_condattr_destroy(&attrcondv)!=0){clean_resources();exit(-1);}
 }
 
+int compareLaps(const void *a, const void *b){
+    int laps_a=((struct car*)a)->laps;
+    int laps_b=((struct car*)b)->laps;
+    //multiply by -1 so it gets ordered by descending order
+    return -1*(laps_a-laps_b); //if laps_a > laps_b..the result will be > 0 ; if laps_a==laps_b..the result will be 0 ; ..
+}
+
 void print_stats(){
+    char log[BUFF_SIZE];
+    int i,count=0,max_cars_qnt=config.teams_qnt*config.max_car_qnt_per_team;
+    struct car sorted_cars[max_cars_qnt];
+
+    //copy cars array in shared memory to aux array 
+    memcpy(&sorted_cars,&cars,sizeof(struct car)*max_cars_qnt);
+    qsort(sorted_cars,max_cars_qnt,sizeof(struct car),compareLaps); //SORT CARS BY LAPS QNT
+
+    //WRITE TO LOG & STDOUT 
+    if(sem_wait(sem_log)==-1){
+        forced_shutdown(); //erro
+    }
     if(sem_wait(sem_stats) == -1){
         forced_shutdown();    
     }
 
-    //write to stdout
-    fprintf(stdout,"\n\t[STATISTICS]\n");
-    //TODO:
+    fprintf(stdout,"\n\t[STATISTICS]\n--Top 5:\n"); //write to stdout
+    fprintf(log_fp,"\n\t[STATISTICS]\n--Top 5:\n"); //write to log file
+    for(i=0;i<5;i++){
+        if(sorted_cars[i].speed!=0){ //to make sure that's a valid initialized car
+            sprintf(log,"%do__| Car Number %s | Team %s | Laps %d | Box stops %d |\n",++count,sorted_cars[i].car_number,teams[sorted_cars[i].team_index].team_name,sorted_cars[i].laps,sorted_cars[i].box_stops)
+            fprintf(stdout,"%s",log); //write to stdout
+            fprintf(log_fp,"%s",log); //write to log file
+        }
+    }
+    for(i=max_cars_qnt-1;i>=0;i--){
+        if(sorted_cars[i].speed!=0){ //to make sure that's a valid initialized car
+            sprintf(log,"\nLast Place__| Car Number %s | Team %s | Laps %d | Box stops %d |\n",sorted_cars[i].car_number,teams[sorted_cars[i].team_index].team_name,sorted_cars[i].laps,sorted_cars[i].box_stops)
+            fprintf(stdout,"%s",log); //write to stdout
+            fprintf(log_fp,"%s",log); //write to log file
+            break;
+        }
+    }
 
+    sprintf(log,"\nTotal Malfunctions: %d\nTotal Refuels: %d\n\tOn Track: %d cars\n\t________________",shared_memory->total_malfunctions,shared_memory->total_refuels,shared_memory->cars_in_pista_qnt);
+    fprintf(stdout,"%s\n",log); //write to stdout
+    fprintf(log_fp,"%s\n",log); //write to log file
+    fflush(log_fp);
 
     if(sem_post(sem_stats) == -1){
         forced_shutdown();   
     }
+    if(sem_post(sem_log)==-1){
+        forced_shutdown(); //erro
+    } 
 }
 
 char* box_state_to_str(int state){
@@ -1229,7 +1326,7 @@ void forced_shutdown(void){
     clean_resources(); 
 
     //forçar matar todos os processos deste programa
-    system("killall -9 main");
+    system("killall -9 main"); 
 }
 
 void update_curr_time(void){

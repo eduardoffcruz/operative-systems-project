@@ -39,10 +39,8 @@ typedef struct Config{
 enum box_state_type{LIVRE,OCUPADA,RESERVADA};
 enum race_state_type{OFF,ON}; //se está a decorrer corrida ou não
 enum car_state_type{CORRIDA,SEGURANCA,BOX,DESISTENCIA,TERMINADO};
-typedef struct mem_struct{
-    //TODO: preencher à medida das necessidade
-    //contém todos os dados necessários à boa gestão da corrida
 
+typedef struct mem_struct{
     int curr_teams_qnt; //current teams qnt
 
     int new_car_team; //indicação da equipa onde foi adicionado o novo carro (protected by mutex_race_state)
@@ -50,22 +48,15 @@ typedef struct mem_struct{
     pthread_mutex_t mutex_race_state;
     pthread_cond_t race_state_cond;
     enum race_state_type race_state; 
-
     //
     int stop_race_readers_in;
     int stop_race_readers_out;
     int wait_to_read;
     int stop_race; //signal triggered
-
     //STATS
-    //pthread_mutex_t mutex_stats; //process shared (lighter weight than semaphores)
-    int malfunction_counter; //contador de avarias durante a corrida
-    int fuel_counter; //contador de abastecimentos realizados durante a corrida
-
-
-    //para synch da leitura e escrita do estado da corrida
-    //int race_state_readers;
-
+    int total_malfunctions; //contador de avarias durante a corrida
+    int total_refuels; //contador de abastecimentos realizados durante a corrida
+    int cars_in_pista_qnt; 
 }mem_struct;
 
 //Car
@@ -75,19 +66,20 @@ typedef struct car{
     int speed; 
     float consumption;
     int reliability;
-
     int team_index;
-
     enum car_state_type car_state;
+    //STATS
+    int laps; //counter
+    int box_stops; //counter
 }car;
 
 //Teams 
 typedef struct team{
-    char team_name[128];
+    char team_name[64];
     int curr_car_qnt;
-
     pthread_mutex_t mutex_write_to_unnamed_pipe; //mutex para synchronizar escrita por vários carros de uma equipa no unnamed pipe dessa equipa
     //^todas as alterações de estado dos carros são comunicadas através do unnamed pipe de cada equipa logo podemos aproveitar este mecanismo de synch para atualizar o estado do carro em memória partilhada
+    //de forma mais eficiente
     /**********BOX**************/
     enum box_state_type box_state;
     int cars_in_safety_mode;
@@ -110,43 +102,29 @@ typedef struct message{
     int val;
 }message;
 
-//STATS
-typedef struct stats{
-    int total_malfunctions; //total de avarias ocorridas durante a corrida
-    int total_refuels; //total de abastecimentos realizados durante a corrida
-    int cars_in_pista_qnt; //numero de carros em pista
-}stats;
-
 //GLOBAL VARIABLES
 Config config;
 FILE *log_fp;
+char curr_time[9]; 
+//named pipe fd
 int fd_named_pipe;
-int (*fd_unnamed_pipe)[2]; //array of unnamed pipe file descriptors
-int shmid; //shared memory id
+//array of unnamed pipe file descriptors
+int (*fd_unnamed_pipe)[2];
+//shared memory id
+int shmid; 
 /*SHARED MEMORY*/
 mem_struct *shared_memory; 
 team *teams;
 car *cars;
 /********************/
-int mq_id; //msg queue identifier
+//msg queue identifier
+int mq_id;
 //semaphores
 sem_t* sem_log; //used to assure mutual exclusion when writing to log file and to stdout
-
-
 sem_t* sem_stop_race_readers_in;
 sem_t* sem_stop_race_readers_out;
 sem_t* sem_write_stop_race;
-
 sem_t* sem_stats;
-
-//sem_t* sem_write_race_state;
-//sem_t* sem_mutex_race_state;
-
-//sem_t* sem_malfunction_generator;
-
-
-char curr_time[9]; 
-
 
 //FUNCTION DECLARATION
 void race_manager(void);
