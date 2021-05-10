@@ -1216,18 +1216,20 @@ void print_stats(){
         forced_shutdown();    
     }
 
-    fprintf(stdout,"\n\t[STATISTICS]\n\tTop 5:\n"); //write to stdout
-    fprintf(log_fp,"\n\t[STATISTICS]\n\tTop 5:\n"); //write to log file
+    update_curr_time();
+
+    fprintf(stdout,"%s\t[STATISTICS]\nTop 5:\n",curr_time); //write to stdout
+    fprintf(log_fp,"%s\t[STATISTICS]\nTop 5:\n",curr_time); //write to log file
     if(cars_qnt<5){
         top_limit=cars_qnt;
     }
     for(i=0;i<top_limit;i++){
-        sprintf(log,"[%d]-| Car %s\t| Team %s\t| Laps %d\t| Box Stops %d\t|\n",++count,sorted_cars[i].car_number,teams[sorted_cars[i].team_index].team_name,sorted_cars[i].laps,sorted_cars[i].box_stops);
+        sprintf(log,"[%d]-| Car %s | Team %s | Laps %d | Box Stops %d |\n",++count,sorted_cars[i].car_number,teams[sorted_cars[i].team_index].team_name,sorted_cars[i].laps,sorted_cars[i].box_stops);
         fprintf(stdout,"%s",log); //write to stdout
         fprintf(log_fp,"%s",log); //write to log file
     }
 
-    sprintf(log,"\n[Last]-| Car %s\t| Team %s\t| Laps %d\t| Box Stops %d\t|\n",sorted_cars[cars_qnt-1].car_number,teams[sorted_cars[cars_qnt-1].team_index].team_name,sorted_cars[cars_qnt-1].laps,sorted_cars[cars_qnt-1].box_stops);
+    sprintf(log,"\n[Last]-| Car %s | Team %s | Laps %d | Box Stops %d |\n",sorted_cars[cars_qnt-1].car_number,teams[sorted_cars[cars_qnt-1].team_index].team_name,sorted_cars[cars_qnt-1].laps,sorted_cars[cars_qnt-1].box_stops);
     fprintf(stdout,"%s",log); //write to stdout
     fprintf(log_fp,"%s",log); //write to log file
         
