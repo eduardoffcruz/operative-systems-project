@@ -43,7 +43,8 @@ enum car_state_type{CORRIDA,SEGURANCA,BOX,DESISTENCIA,TERMINADO};
 typedef struct mem_struct{
     int curr_teams_qnt; //current teams qnt
 
-    int new_car_team; //indicação da equipa onde foi adicionado o novo carro (protected by mutex_race_state)
+    int total_car_count;
+    //int new_car_team; //indicação da equipa onde foi adicionado o novo carro (protected by mutex_race_state)
 
     pthread_mutex_t mutex_race_state;
     pthread_cond_t race_state_cond;
@@ -147,7 +148,7 @@ void handle_sigint_sigtstp(int sig);
 int add_car_to_teams_shm(char* team_name, char* car_number,int speed,float consumption, int reliability);
 void add_car_to_team(int i,int j,char* car_number, int speed, float consumption, int reliability);
 void add_team_to_shm(char *team_name, int i);
-void handle_addcar_command(char *command);
+int handle_addcar_command(char *command);
 int is_valid_positive_float(char* str);
 int is_valid_integer(char *str);
 int validate_addcar_command(char *command, char *team_name, char* car_num, int *speed, float* cons, int *rel);
