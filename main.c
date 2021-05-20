@@ -5,10 +5,11 @@
 //echo "ADDCAR TEAM: A, CAR: 20, SPEED: 30, CONSUMPTION: 0.04, RELIABILITY: 95" > my_pipe
 //(...)
 //echo "START RACE!" > my_pipe
+//kill -10 <pid> --->sigusr1
 
 #include "main.h"
 
-#define DEBUG 
+//#define DEBUG 
 
 int main(void){
     //RACE SIMULATOR PROCESS (main process)
