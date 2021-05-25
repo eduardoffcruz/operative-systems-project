@@ -732,7 +732,7 @@ void team_manager(int team_id){
                 //desbloqueia quando: teams[team_id].car_in_box!=last_car_in_box || teams[team_id].cars_in_safety_mode!=last_cars_in_safety_mode || race_state==OFF
                 if(pthread_cond_wait(&teams[team_id].car_changed_state_cond,&teams[team_id].mutex_car_changed_state)!=0){forced_shutdown();}
             }
-            if(tmp==OFF){
+            if(get_race_state()==OFF){
                 #ifdef DEBUG
                 printf("[DEBUG] team %s closed the BOX!\n",teams[team_id].team_name);
                 #endif
